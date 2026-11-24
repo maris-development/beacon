@@ -68,7 +68,7 @@ impl ZarrPath {
     pub fn as_zarr_json_path(&self) -> String {
         match self {
             ZarrPath::ObjectMeta(meta) => meta.location.as_ref().to_string(),
-            ZarrPath::DirPath(path) => path.child("zarr.json").as_ref().to_string(),
+            ZarrPath::DirPath(path) => path.clone().join("zarr.json").as_ref().to_string(),
         }
     }
 
@@ -93,7 +93,7 @@ impl ZarrPath {
             ));
         }
 
-        let zarr_json_path = path.child("zarr.json");
+        let zarr_json_path = path.clone().join("zarr.json");
         let exists = object_store.head(&zarr_json_path).await.is_ok();
         if !exists {
             return Err(format!(

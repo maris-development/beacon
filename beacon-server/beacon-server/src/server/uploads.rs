@@ -94,7 +94,7 @@ impl UploadSessions {
         let total = session.total + bytes.len() as u64;
         if session.max_bytes != 0 && total > session.max_bytes {
             // Drop the session and its parts: the upload can never succeed.
-            let mut session = sessions.remove(&id).expect("session was just borrowed");
+            let session = sessions.remove(&id).expect("session was just borrowed");
             let _ = session.writer.abort().await;
             return Err(FileError::TooLarge {
                 limit: session.max_bytes,
@@ -127,7 +127,7 @@ impl UploadSessions {
 
     /// Discard an in-progress upload and the parts already written.
     pub async fn abort(&self, id: Uuid) -> Result<(), FileError> {
-        let mut session = {
+        let session = {
             let mut sessions = self.sessions.lock().await;
             sweep(&mut sessions);
             sessions

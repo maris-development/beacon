@@ -166,6 +166,16 @@ pub(crate) fn parse_column_name(name: &str) -> Expr {
     col(Column::from_name(name))
 }
 
+/// The nanosecond timestamp literal of `time`, read as UTC.
+pub(crate) fn timestamp_literal(time: &chrono::NaiveDateTime) -> datafusion::error::Result<Expr> {
+    let nanos = time.and_utc().timestamp_nanos_opt().ok_or_else(|| {
+        datafusion::error::DataFusionError::Plan(format!(
+            "timestamp {time} is out of the nanosecond range"
+        ))
+    })?;
+    Ok(lit_timestamp_nano(nanos))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

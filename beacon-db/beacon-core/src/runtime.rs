@@ -859,21 +859,6 @@ mod client_query_tests {
             .expect("sql should drain");
     }
 
-    /// Like `run_sql`, but returns the result (draining the stream) so callers can
-    /// assert on failures from side-effecting statements.
-    async fn try_run_sql(runtime: &Runtime, sql: &str) -> anyhow::Result<()> {
-        runtime
-            .run_query(
-                crate::query::Query::sql(sql.to_string()),
-                crate::plan_validator::allow_all(),
-            )
-            .await?
-            .into_record_stream()?
-            .try_collect::<Vec<_>>()
-            .await?;
-        Ok(())
-    }
-
     /// A client query, as the transport hands it over: the request body's keys
     /// are flattened onto `Query` itself.
     fn query(value: serde_json::Value) -> crate::query::Query {

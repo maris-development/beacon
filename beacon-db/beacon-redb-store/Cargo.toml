@@ -16,13 +16,10 @@ memmap2 = { workspace = true }
 async-trait = { workspace = true }
 bytes = { workspace = true }
 futures = { workspace = true }
-futures-util = { workspace = true }
 tokio = { workspace = true }
 chrono = { workspace = true }
 serde = { workspace = true }
 bincode = { workspace = true }
-thiserror = { workspace = true }
-tracing = { workspace = true }
 
 [dev-dependencies]
 # The `integration` feature exposes object_store's own conformance suite

@@ -3,7 +3,7 @@ use datafusion::{
     arrow::datatypes::Schema,
     execution::SessionState,
     logical_expr::lit,
-    prelude::{lit_timestamp_nano, Expr},
+    prelude::Expr,
 };
 
 use crate::filter::try_coerce_number_to_schema;
@@ -54,7 +54,7 @@ impl Gteq {
             }
             Gteq::Timestamp { gt_eq, column } => {
                 let column = parse_column_name(&column);
-                Ok(column.gt_eq(lit_timestamp_nano(gt_eq.timestamp_nanos())))
+                Ok(column.gt_eq(super::timestamp_literal(gt_eq)?))
             }
             Gteq::String { gt_eq, column } => {
                 let column = parse_column_name(&column);

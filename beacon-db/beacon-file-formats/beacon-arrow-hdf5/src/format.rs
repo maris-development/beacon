@@ -293,11 +293,6 @@ impl Hdf5Format {
         self.read_dimensions.as_ref()
     }
 
-    /// Whether this format skips a file that does not fit its dimensions.
-    pub fn skips_unbroadcastable(&self) -> bool {
-        self.skip_unbroadcastable
-    }
-
     /// Whether this format unifies the dimensions netCDF invents, by length.
     pub fn unifies_phony_dimensions(&self) -> bool {
         self.read.unify_phony_dimensions

@@ -33,7 +33,6 @@ once_cell = { workspace = true }
 lazy_static = {workspace = true}
 gsw = {workspace = true}
 lru = {workspace = true}
-tracing = { workspace = true }
 tokio = { workspace = true }
 futures = { workspace = true }
 chrono = { workspace = true }
@@ -53,5 +52,4 @@ beacon-arrow-csv = { path = "../beacon-file-formats/beacon-arrow-csv" }
 beacon-arrow-parquet = { path = "../beacon-file-formats/beacon-arrow-parquet" }
 beacon-arrow-geoparquet = { path = "../beacon-file-formats/beacon-arrow-geoparquet" }
 beacon-datafusion-ext = { path = "../beacon-datafusion-ext" }
-beacon-external-table = { path = "../beacon-external-table" }
 datafusion-spatial = { workspace=true }

@@ -66,7 +66,7 @@ async fn open_table_definition(
 mod tests {
     use super::load_tables_from_object_store;
     use beacon_datafusion_ext::table_ext::{TableDefinition, ViewTableDefinition};
-    use object_store::{ObjectStore, ObjectStoreExt, memory::InMemory, path::Path};
+    use object_store::{ObjectStoreExt, memory::InMemory, path::Path};
     use std::sync::Arc;
 
     fn view_definition(name: &str) -> Arc<dyn TableDefinition> {

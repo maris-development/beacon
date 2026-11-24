@@ -3,7 +3,7 @@ use datafusion::{
     arrow::datatypes::Schema,
     execution::SessionState,
     logical_expr::lit,
-    prelude::{lit_timestamp_nano, Expr},
+    prelude::Expr,
 };
 
 use crate::filter::try_coerce_number_to_schema;
@@ -57,7 +57,7 @@ impl Neq {
             }
             Neq::Timestamp { neq, column } => {
                 let column = parse_column_name(&column);
-                Ok(column.not_eq(lit_timestamp_nano(neq.timestamp_nanos())))
+                Ok(column.not_eq(super::timestamp_literal(neq)?))
             }
             Neq::String { neq, column } => {
                 let column = parse_column_name(&column);

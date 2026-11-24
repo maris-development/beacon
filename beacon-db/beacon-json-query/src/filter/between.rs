@@ -1,4 +1,4 @@
-use datafusion::prelude::{lit, lit_timestamp_nano};
+use datafusion::prelude::lit;
 
 use crate::filter::{get_column_type, parse_column_name};
 
@@ -64,8 +64,8 @@ impl Between {
             } => {
                 let column = super::parse_column_name(column);
                 Ok(column.between(
-                    lit_timestamp_nano(gt_eq.timestamp_nanos()),
-                    lit_timestamp_nano(lt_eq.timestamp_nanos()),
+                    super::timestamp_literal(gt_eq)?,
+                    super::timestamp_literal(lt_eq)?,
                 ))
             }
             Between::String {

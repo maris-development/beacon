@@ -214,7 +214,6 @@ mod tests {
     #[tokio::test]
     async fn definition_build_provider_rediscovers_rows() {
         use beacon_datafusion_ext::table_ext::TableDefinition;
-        use datafusion::execution::object_store::ObjectStoreUrl;
 
         let dir = tempfile::tempdir().unwrap();
         let warehouse = test_warehouse(&dir);
