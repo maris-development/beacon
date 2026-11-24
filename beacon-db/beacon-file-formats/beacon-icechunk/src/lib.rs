@@ -3,8 +3,8 @@
 //! [Icechunk](https://icechunk.io) holds a Zarr v3 hierarchy with transactions,
 //! snapshots and branches. Beacon reads one through the same code a plain zarr
 //! store goes through: the repository supplies the storage a group is opened
-//! over, and schema inference, the leaf-group walk, the `beacon-nd-array` scan
-//! and the predicate pushdown are unchanged (see `beacon-arrow-zarr`).
+//! over, and schema inference, the leaf-group walk, the ND scan and the
+//! predicate pushdown are unchanged (see `beacon-arrow-zarr`).
 //!
 //! Two surfaces are exposed:
 //! - [`ReadIcechunkFunc`], the `read_icechunk(...)` table function.

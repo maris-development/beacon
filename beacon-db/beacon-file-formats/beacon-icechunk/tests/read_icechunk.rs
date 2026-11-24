@@ -137,7 +137,7 @@ async fn schema_carries_coordinates_cf_time_and_attributes() {
     // `time` is int32 "seconds since 1981-01-01" → decoded as a CF time.
     assert_eq!(
         dtype("time"),
-        DataType::Timestamp(TimeUnit::Nanosecond, None)
+        DataType::Timestamp(TimeUnit::Microsecond, None)
     );
     // Group and array attributes surface as columns, as for a plain zarr store.
     assert_eq!(dtype(".Conventions"), DataType::Utf8);

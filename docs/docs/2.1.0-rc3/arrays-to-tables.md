@@ -211,8 +211,10 @@ For such a file, and only for such a file, Beacon moves the volume to the front:
 4. is the native dimension set of the most variables,
 5. was seen first.
 
-One real dimension name is enough to restore the order above. Every NetCDF and Zarr file names its
-dimensions, so none of them moves. Beacon writes one `info` line. The line names
+One real dimension name is enough to restore the order above. Every NetCDF file names its
+dimensions, so none of them moves. A Zarr group moves only when no dimension of the group has a
+name from `dimension_names`. See [Dimension names](/docs/2.1.0-rc3/formats/zarr#dimension-names).
+Beacon writes one `info` line. The line names
 the variables that it dropped:
 
 ```text
