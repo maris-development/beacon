@@ -173,8 +173,9 @@ LIMIT 0;
 
 ## Zarr
 
-Zarr goes through the same decoding path as NetCDF. The attribute names and the rules above apply
-unchanged.
+Zarr has its own rules. A Zarr time column is `Timestamp(µs)`. `missing_value`, `valid_min`,
+`valid_max` and `valid_range` give nulls. A calendar that is not supported gives numbers, not an
+error. See [CF decode](/docs/2.1.0-rc3/formats/zarr#cf-decode) on the Zarr page for the full list.
 
 ## Atlas
 
