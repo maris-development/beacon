@@ -8,7 +8,6 @@ use beacon_arrow_netcdf::oxcdf_reader::open_file;
 use beacon_nd_dataset::{attribute_columns, Error, NdDataset, Result};
 use beacon_nd_scan::NdFileOpener;
 use object_store::{ObjectMeta, ObjectStore};
-use oxcdf::AsyncNetcdfFile;
 
 use super::dataset::dataset_of;
 use crate::conventions::optodas;
@@ -39,15 +38,8 @@ impl NdFileOpener for Hdf5Opener {
         file: &ObjectMeta,
     ) -> Result<Arc<dyn NdDataset>> {
         let name = file.location.to_string();
+        // A ragged file reads too: the NetCDF reader refuses it, so HDF5 is its reader.
         let hdf5 = Arc::new(open_file(store, file).await.map_err(Error::format)?);
-        if is_ragged(&hdf5) {
-            return Err(Error::Unsupported {
-                reason: format!(
-                    "'{name}' is a ragged dataset; the HDF5 reader does not support ragged datasets yet"
-                ),
-                dataset: name,
-            });
-        }
 
         // One name per length, so a dataset of one group broadcasts against another.
         let mut phony = PhonyDimensions::of_file(&hdf5);
@@ -77,12 +69,4 @@ impl NdFileOpener for Hdf5Opener {
         let dataset = dataset_of(&name, &hdf5, &phony, extra, scaled)?;
         Ok(attribute_columns(Arc::new(dataset)))
     }
-}
-
-/// True when a root variable has a `sample_dimension` attribute.
-fn is_ragged(file: &AsyncNetcdfFile) -> bool {
-    file.root()
-        .variables
-        .iter()
-        .any(|variable| variable.attribute("sample_dimension").is_some())
 }

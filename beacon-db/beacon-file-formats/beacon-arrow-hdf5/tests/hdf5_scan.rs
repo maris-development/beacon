@@ -1154,23 +1154,14 @@ async fn a_pruned_scan_counts_what_the_coordinate_says_it_should() {
     );
 }
 
-/// A ragged NetCDF-4 file is refused, as the NetCDF reader refuses it.
+/// A ragged NetCDF-4 file reads through HDF5. The NetCDF reader refuses it, so HDF5 is its reader.
 #[tokio::test]
-async fn a_ragged_file_is_refused() {
-    let path = netcdf_file(WOD_FILE);
-    let store: Arc<dyn ObjectStore> = Arc::new(
-        object_store::local::LocalFileSystem::new_with_prefix(path.parent().unwrap()).unwrap(),
-    );
-    let meta = store
-        .head(&object_store::path::Path::from(WOD_FILE))
-        .await
-        .unwrap();
-    let error = Hdf5Opener::new(beacon_arrow_hdf5::ReadOptions::default())
-        .open(store, &meta)
-        .await
-        .unwrap_err();
+async fn a_ragged_file_reads() {
+    let ctx = session();
+    register(&ctx, "wod", &netcdf_file(WOD_FILE)).await;
+    let batch = collect(&ctx, "SELECT lat FROM wod").await;
     assert!(
-        matches!(error, beacon_nd_dataset::Error::Unsupported { .. }),
-        "{error}"
+        batch.num_rows() > 0,
+        "the WOD CTD fixture should yield rows"
     );
 }
