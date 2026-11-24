@@ -33,7 +33,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use arrow::array::{Array, AsArray};
-use arrow::datatypes::{DataType, Field, Float64Type, Schema};
+use arrow::datatypes::{DataType, Field, Float64Type, Schema, TimeUnit};
 use beacon_nd_dataset::{Attributes, NdDataset, NdVariable};
 use beacon_nd_scan::file_statistics;
 use datafusion::{
@@ -256,6 +256,15 @@ fn attribute_range(attributes: &Attributes, data_type: &DataType) -> Option<Rang
     }
 
     match data_type {
+        DataType::Timestamp(TimeUnit::Microsecond, _) => {
+            // A Float32 time stores the f32 nearest to the text. Step out past it.
+            let low = low.next_down().min(((low as f32).next_down()) as f64);
+            let high = high.next_up().max(((high as f32).next_up()) as f64);
+            Some((
+                time_bound(data_type, attributes, low, BoundSide::Lower)?,
+                time_bound(data_type, attributes, high, BoundSide::Upper)?,
+            ))
+        }
         DataType::Timestamp(_, _) => Some((
             time_bound(data_type, attributes, low, BoundSide::Lower)?,
             time_bound(data_type, attributes, high, BoundSide::Upper)?,
@@ -345,7 +354,6 @@ fn int_range<T: TryFrom<i64>>(low: f64, high: f64, min: f64, max: f64) -> Option
 mod tests {
     use super::*;
     use arrow::array::Float64Array;
-    use arrow::datatypes::TimeUnit;
     use nd_arrow_array::compute::time::timestamp_type;
     use nd_arrow_array::{Dimensions, NdArrowArray};
     use serde_json::json;
@@ -454,8 +462,30 @@ mod tests {
             expected[1],
             ScalarValue::TimestampMicrosecond(Some(60_000_000), None)
         );
-        assert_eq!(range.0, expected[0]);
-        assert_eq!(range.1, expected[1]);
+        assert_within_one_f32_step(&a, &range, 0.0, 60.0);
+    }
+
+    /// The time range contains the decode of `low` and `high`, and is at most
+    /// one f32 step wider on each side.
+    fn assert_within_one_f32_step(attributes: &Attributes, range: &Range, low: f64, high: f64) {
+        let inner = decoded(attributes, vec![low, high]);
+        let outer = decoded(
+            attributes,
+            vec![
+                (low as f32).next_down() as f64,
+                (high as f32).next_up() as f64,
+            ],
+        );
+        assert!(
+            outer[0] <= range.0 && range.0 <= inner[0],
+            "min {:?} {inner:?} {outer:?}",
+            range.0
+        );
+        assert!(
+            inner[1] <= range.1 && range.1 <= outer[1],
+            "max {:?} {inner:?} {outer:?}",
+            range.1
+        );
     }
 
     /// `CfTimeUnits` alone reads the Julian reference date as Gregorian, 13 days early.
@@ -467,12 +497,25 @@ mod tests {
             ("calendar", json!("julian")),
         ]);
         let range = attribute_range(&a, &timestamp_type()).unwrap();
-        let expected = decoded(&a, vec![0.0, 1.0]);
-        assert_eq!(range.0, expected[0]);
-        assert_eq!(range.1, expected[1]);
+        assert_within_one_f32_step(&a, &range, 0.0, 1.0);
         // Gregorian 2000-01-01, the date the reference text names.
         let gregorian = ScalarValue::TimestampMicrosecond(Some(946_684_800_000_000), None);
         assert_ne!(range.0, gregorian);
+    }
+
+    /// A Float32 time stores the f32 nearest to the text, which the f64 of the
+    /// JSON attribute can miss.
+    #[test]
+    fn a_float32_time_range_contains_the_decoded_values() {
+        let a = attrs(&[
+            ("actual_range", json!([0.1, 0.2])),
+            ("units", json!("days since 1970-01-01")),
+        ]);
+        let micros = DataType::Timestamp(TimeUnit::Microsecond, None);
+        let range = attribute_range(&a, &micros).unwrap();
+        let expected = decoded(&a, vec![0.1f32 as f64, 0.2f32 as f64]);
+        assert!(range.0 <= expected[0], "min {range:?} {expected:?}");
+        assert!(range.1 >= expected[1], "max {range:?} {expected:?}");
     }
 
     #[test]
