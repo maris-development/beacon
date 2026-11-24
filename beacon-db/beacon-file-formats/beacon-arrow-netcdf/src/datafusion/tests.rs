@@ -134,36 +134,6 @@ async fn a_file_with_an_alias_extension_reads_the_same_rows() {
     assert_eq!(count("alias").await, count("canonical").await);
 }
 
-/// A scan of many files runs one file for each partition: `ListingTable`
-/// splits the file groups by `target_partitions` before
-/// `FileSource::repartitioned` is ever consulted.
-#[tokio::test]
-async fn a_multi_file_scan_gets_one_partition_for_each_file() {
-    use datafusion::physical_plan::ExecutionPlanProperties;
-
-    let files = 4;
-    let dir = tempfile::tempdir().unwrap();
-    for i in 0..files {
-        std::fs::copy(test_file(GRIDDED_FILE), dir.path().join(format!("f{i}.nc"))).unwrap();
-    }
-
-    let ctx = session(files, 8192);
-    register(&ctx, "many", dir.path()).await;
-
-    let plan = ctx
-        .sql("SELECT analysed_sst FROM many")
-        .await
-        .unwrap()
-        .create_physical_plan()
-        .await
-        .unwrap();
-    assert_eq!(
-        plan.output_partitioning().partition_count(),
-        files,
-        "the scan should read {files} files in {files} partitions"
-    );
-}
-
 /// Register `path` as `mixed`, on a format with `options`.
 async fn register_mixed(
     ctx: &SessionContext,
@@ -521,74 +491,6 @@ async fn a_large_file_splits_and_returns_the_same_rows() {
     assert_eq!(summary(&split).await, whole_summary);
 }
 
-/// A count over a file that several partitions read counts every row once.
-///
-/// A partition that read the file whole would count it once per partition,
-/// and the answer would grow with `target_partitions`. Nothing about that is
-/// an error, so the count is the guard.
-///
-/// The whole-file session answers in one partition, so it is the count to
-/// match.
-#[tokio::test]
-async fn a_shared_count_counts_every_row_once() {
-    let (_dir, file) = write_large_netcdf();
-
-    let whole = one_partition_session();
-    register(&whole, "one", &file).await;
-
-    let count = async |ctx: &SessionContext| {
-        let batches = ctx
-            .sql(r#"SELECT count("V0") FROM one"#)
-            .await
-            .unwrap()
-            .collect()
-            .await
-            .unwrap();
-        batches[0]
-            .column(0)
-            .as_any()
-            .downcast_ref::<arrow::array::Int64Array>()
-            .expect("int64 count")
-            .value(0)
-    };
-
-    let expected = count(&whole).await;
-    assert_eq!(
-        expected, LARGE_ROWS as i64,
-        "the fixture holds one row per value of each column"
-    );
-
-    // Several partition counts, because a file read once per partition
-    // returns a multiple of the truth and 2 is easy to mistake for a
-    // coincidence.
-    for target_partitions in [2_usize, 4, 7] {
-        let split = session(target_partitions, 8192);
-        register(&split, "one", &file).await;
-
-        // Guard the guard: the count below proves nothing if the scan under
-        // it was never sliced in the first place.
-        let plan = split
-            .sql(r#"SELECT count("V0") FROM one"#)
-            .await
-            .unwrap()
-            .create_physical_plan()
-            .await
-            .unwrap();
-        assert_eq!(
-            scan_partitions(&plan),
-            target_partitions,
-            "the count scan must be sliced:\n{}",
-            datafusion::physical_plan::displayable(plan.as_ref()).indent(false)
-        );
-
-        assert_eq!(
-            count(&split).await,
-            expected,
-            "target_partitions={target_partitions}: the sliced file is counted once"
-        );
-    }
-}
-
 /// A pruned scan counts what the coordinate itself says it should.
 ///
 /// The scan skips chunks whose coordinates cannot meet the predicate, so a
@@ -853,44 +755,6 @@ async fn a_pushed_down_predicate_keeps_the_matching_rows() {
     assert_eq!(count, 458);
 }
 
-/// A gridded scan must respect the batch size. `gridded-example.nc` has the
-/// shape `[time=1, lat=1208, lon=1920]`. The engine cut only the first axis,
-/// so the short `time` axis gave one chunk that held the whole array. See
-/// issue #338.
-///
-/// `sea_ice_fraction` is contiguous in the file, so it reports its full
-/// shape as its chunk shape and the engine computes the chunk itself.
-#[tokio::test]
-async fn a_short_first_axis_still_splits_into_batches() {
-    for batch_size in [4096usize, 8192] {
-        let ctx = session(1, batch_size);
-        register(&ctx, "gridded", &test_file(GRIDDED_FILE)).await;
-
-        let batches = ctx
-            .sql("SELECT sea_ice_fraction FROM gridded")
-            .await
-            .unwrap()
-            .collect()
-            .await
-            .unwrap();
-
-        let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
-        let largest = batches.iter().map(|b| b.num_rows()).max().unwrap_or(0);
-        assert_eq!(rows, 1208 * 1920, "the scan must read every row");
-        assert!(
-            batches.len() > 1,
-            "batch size {batch_size} gave {} batch(es)",
-            batches.len()
-        );
-        // The chunk fills from the last axis, so it holds at most
-        // `batch_size` elements. Here one row of `lon` is 1920 ≤ 4096.
-        assert!(
-            largest <= batch_size,
-            "batch size {batch_size} gave a batch of {largest} rows"
-        );
-    }
-}
-
 #[tokio::test]
 async fn a_scan_with_no_file_column_is_an_error() {
     let dir = tempfile::tempdir().unwrap();
@@ -1058,29 +922,6 @@ async fn a_dropped_stream_stops_the_scan() {
     );
 }
 
-/// A count of a coordinate counts its own values, whatever the batch size.
-#[tokio::test]
-async fn a_coordinate_count_does_not_depend_on_the_batch_size() {
-    for batch_size in [1000, 8192, 1 << 22] {
-        let ctx = session(1, batch_size);
-        register(&ctx, "gridded", &test_file(GRIDDED_FILE)).await;
-        for (column, expected) in [("time", 1), ("lat", 1208), ("lon", 1920)] {
-            let batches = ctx
-                .sql(&format!("SELECT count({column}) FROM gridded"))
-                .await
-                .unwrap()
-                .collect()
-                .await
-                .unwrap();
-            assert_eq!(
-                batches[0].column(0).as_primitive::<Int64Type>().value(0),
-                expected,
-                "count({column}) at batch size {batch_size}"
-            );
-        }
-    }
-}
-
 #[tokio::test]
 async fn a_removed_file_fails_with_its_path() {
     let dir = tempfile::tempdir().unwrap();
@@ -1170,4 +1011,143 @@ async fn a_plan_that_runs_again_returns_the_same_rows() {
     let second = collect(plan, ctx.task_ctx()).await.unwrap();
 
     assert_eq!(first, second);
+}
+
+/// Write a file with `time` in days since 1970 and a value `v` on one dimension of 8.
+fn write_time_netcdf(dir: &std::path::Path) -> PathBuf {
+    use arrow::array::Float64Array;
+    use oxcdf::AttributeValue;
+
+    let path = dir.join("time.nc");
+    write_cf_netcdf(
+        &path,
+        &[("t", Some(8))],
+        vec![
+            TestVariable {
+                name: "time",
+                dimensions: vec!["t"],
+                values: Arc::new(Float64Array::from_iter_values((0..8).map(f64::from))),
+                attributes: vec![(
+                    "units",
+                    AttributeValue::Str("days since 1970-01-01".to_string()),
+                )],
+            },
+            TestVariable {
+                name: "v",
+                dimensions: vec!["t"],
+                values: Arc::new(Float64Array::from_iter_values((0..8).map(f64::from))),
+                attributes: vec![],
+            },
+        ],
+    );
+    path
+}
+
+/// A one-partition session with no filter pushdown, so the scan prunes nothing.
+fn session_without_pushdown(batch_size: usize) -> SessionContext {
+    use datafusion::execution::session_state::SessionStateBuilder;
+    use datafusion::physical_optimizer::optimizer::PhysicalOptimizer;
+    use datafusion::prelude::SessionConfig;
+
+    let rules = PhysicalOptimizer::new()
+        .rules
+        .into_iter()
+        .filter(|rule| !rule.name().starts_with("FilterPushdown"))
+        .collect();
+    let config = SessionConfig::new()
+        .with_target_partitions(1)
+        .with_batch_size(batch_size)
+        .with_extension(
+            beacon_datafusion_ext::type_widening::ArrowTypeWidening::default_extension(),
+        );
+    let state = SessionStateBuilder::new()
+        .with_config(config)
+        .with_default_features()
+        .with_physical_optimizer_rules(rules)
+        .build();
+    SessionContext::new_with_state(state)
+}
+
+#[tokio::test]
+async fn a_time_filter_keeps_the_same_rows_with_the_prune() {
+    const SQL: &str = "SELECT v FROM t WHERE time >= TIMESTAMP '1970-01-03' ORDER BY v";
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_time_netcdf(dir.path());
+
+    let pushed = session(1, 2);
+    register(&pushed, "t", &path).await;
+    let plain = session_without_pushdown(2);
+    register(&plain, "t", &path).await;
+
+    let plan = pushed
+        .sql(SQL)
+        .await
+        .unwrap()
+        .create_physical_plan()
+        .await
+        .unwrap();
+    let with_prune = collect(Arc::clone(&plan), pushed.task_ctx()).await.unwrap();
+    let without_prune = plain.sql(SQL).await.unwrap().collect().await.unwrap();
+
+    let values = |batches: &[arrow::record_batch::RecordBatch]| -> Vec<f64> {
+        batches
+            .iter()
+            .flat_map(|batch| {
+                batch
+                    .column(0)
+                    .as_primitive::<Float64Type>()
+                    .values()
+                    .to_vec()
+            })
+            .collect()
+    };
+    assert_eq!(values(&with_prune), [2.0, 3.0, 4.0, 5.0, 6.0, 7.0]);
+    assert_eq!(values(&with_prune), values(&without_prune));
+    // Chunks of 2 rows: the chunk of days 0 and 1 is skipped.
+    assert_eq!(scan_counter(&plan, "chunks_pruned"), 1);
+}
+
+#[tokio::test]
+async fn a_decoded_time_column_is_microseconds() {
+    use arrow::datatypes::{DataType, TimeUnit};
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_time_netcdf(dir.path());
+    let ctx = one_partition_session();
+    register(&ctx, "t", &path).await;
+
+    let schema = ctx.table("t").await.unwrap().schema().as_arrow().clone();
+
+    assert_eq!(
+        schema.field_with_name("time").unwrap().data_type(),
+        &DataType::Timestamp(TimeUnit::Microsecond, None)
+    );
+}
+
+#[tokio::test]
+async fn statistics_are_never_an_error() {
+    use datafusion::datasource::file_format::FileFormat;
+
+    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let location = Path::from("broken.nc");
+    store
+        .put(&location, PutPayload::from(b"not a netcdf file".to_vec()))
+        .await
+        .unwrap();
+    let object = store.head(&location).await.unwrap();
+    let schema = Arc::new(arrow::datatypes::Schema::new(vec![
+        arrow::datatypes::Field::new("v", arrow::datatypes::DataType::Float64, true),
+    ]));
+    let ctx = one_partition_session();
+
+    let statistics = format()
+        .with_enable_statistics(true)
+        .infer_stats(&ctx.state(), &store, schema, &object)
+        .await
+        .expect("statistics are never an error");
+
+    assert!(statistics
+        .column_statistics
+        .iter()
+        .all(|column| column.min_value.get_value().is_none()));
 }

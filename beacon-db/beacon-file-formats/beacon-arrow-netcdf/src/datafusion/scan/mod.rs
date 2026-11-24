@@ -9,7 +9,5 @@ mod output;
 mod prune;
 mod slices;
 mod source;
-#[cfg(test)]
-mod tests;
 
 pub use source::NetcdfSource;

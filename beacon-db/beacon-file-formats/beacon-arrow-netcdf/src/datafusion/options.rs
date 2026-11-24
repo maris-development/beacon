@@ -1,6 +1,8 @@
 use std::{collections::HashMap, num::NonZeroUsize};
 
 use beacon_datafusion_ext::format_options::{format_option, parse_bool_option};
+use beacon_nd_dataset::GridSelection;
+use beacon_nd_scan::NdScanOptions;
 use datafusion::common::exec_datafusion_err;
 
 use crate::attributes::CombineAttrs;
@@ -57,6 +59,19 @@ impl NetcdfOptions {
             }
         }
         self.writer.apply_format_options(format_options)
+    }
+
+    /// The options of the ND framework scan. A NetCDF file has no minimum slice size.
+    pub fn scan_options(&self) -> NdScanOptions {
+        NdScanOptions {
+            grid: match &self.read_dimensions {
+                None => GridSelection::PerFile,
+                Some(list) => GridSelection::Given(list.clone()),
+            },
+            skip_unbroadcastable: self.skip_unbroadcastable,
+            skip_invalid_files: self.skip_invalid_files,
+            min_slice_size: Some(0),
+        }
     }
 }
 
@@ -210,6 +225,25 @@ mod tests {
         let mut options = NetcdfWriterOptions::default();
         options.apply_format_options(&map)?;
         Ok(options)
+    }
+
+    #[test]
+    fn the_scan_options_map_the_read_options() {
+        let defaults = NetcdfOptions::default().scan_options();
+        assert_eq!(defaults.grid, GridSelection::PerFile);
+        assert!(!defaults.skip_unbroadcastable && !defaults.skip_invalid_files);
+        assert_eq!(defaults.min_slice_size, Some(0));
+
+        let given = NetcdfOptions {
+            read_dimensions: Some(vec!["lat".to_string()]),
+            skip_unbroadcastable: true,
+            skip_invalid_files: true,
+            ..NetcdfOptions::default()
+        }
+        .scan_options();
+        assert_eq!(given.grid, GridSelection::Given(vec!["lat".to_string()]));
+        assert!(given.skip_unbroadcastable && given.skip_invalid_files);
+        assert_eq!(given.min_slice_size, Some(0));
     }
 
     #[test]

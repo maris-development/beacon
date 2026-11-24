@@ -4,15 +4,14 @@ use std::sync::Arc;
 
 use arrow::datatypes::{Schema, SchemaRef};
 use beacon_datafusion_ext::listing_factory::ListingFactory;
-use beacon_datafusion_ext::nd::encoded_schema;
 use beacon_datafusion_ext::type_widening::{label_by_object, session_widening};
 use beacon_datafusion_ext::unique_values::UniqueValuesExec;
-use beacon_nd_array::arrow::schema::any_dataset_to_arrow_schema;
-use beacon_nd_array::dataset::AnyDataset;
-use beacon_nd_execution::exec::{NdBroadcastExec, NdSourceExec};
-use datafusion::catalog::memory::DataSourceExec;
+use beacon_nd_execution::exec::nd_scan_plan;
+use beacon_nd_scan::{
+    encoded_table_schema, file_statistics, open_for_read, to_datafusion, NdFileOpener, NdSource,
+};
 use datafusion::catalog::Session;
-use datafusion::common::{exec_datafusion_err, Statistics};
+use datafusion::common::{exec_datafusion_err, plan_err, Statistics};
 use datafusion::datasource::file_format::file_compression_type::FileCompressionType;
 use datafusion::datasource::file_format::FileFormat;
 use datafusion::datasource::physical_plan::{
@@ -21,6 +20,8 @@ use datafusion::datasource::physical_plan::{
 use datafusion::datasource::sink::DataSinkExec;
 use datafusion::datasource::table_schema::TableSchema;
 use datafusion::error::{DataFusionError, Result};
+use datafusion::physical_expr::projection::ProjectionExprs;
+use datafusion::physical_expr::utils::collect_columns;
 use datafusion::physical_expr::{LexOrdering, LexRequirement, PhysicalSortExpr};
 use datafusion::physical_plan::sorts::{
     sort::SortExec, sort_preserving_merge::SortPreservingMergeExec,
@@ -29,10 +30,10 @@ use datafusion::physical_plan::ExecutionPlan;
 use futures::{StreamExt, TryStreamExt};
 use object_store::{ObjectMeta, ObjectStore};
 
-use super::open::{open_for_read, SkipFiles};
 use super::options::NetcdfOptions;
 use super::sink::{NetCDFNdSink, NetCDFSink};
-use super::{statistics, NetcdfSource, NETCDF_EXTENSION};
+use super::NETCDF_EXTENSION;
+use crate::nd::NetcdfOpener;
 
 #[derive(Debug, Clone)]
 pub struct NetcdfFormat {
@@ -57,15 +58,12 @@ impl NetcdfFormat {
         self
     }
 
-    fn skip(&self) -> SkipFiles {
-        SkipFiles {
-            unbroadcastable: self.options.skip_unbroadcastable,
-            invalid: self.options.skip_invalid_files,
-        }
-    }
-
-    fn source(&self, table_schema: TableSchema) -> NetcdfSource {
-        NetcdfSource::new(self.options.read_dimensions.clone(), table_schema).with_skip(self.skip())
+    fn source(&self, table_schema: TableSchema) -> NdSource {
+        NdSource::new(
+            Arc::new(NetcdfOpener),
+            self.options.scan_options(),
+            table_schema,
+        )
     }
 
     /// The schema of one file. A file that a skip option passes over has no column.
@@ -75,18 +73,30 @@ impl NetcdfFormat {
         object: &ObjectMeta,
     ) -> Result<SchemaRef> {
         let opened = open_for_read(
-            store,
+            &NetcdfOpener,
+            Arc::clone(store),
             object,
-            self.options.read_dimensions.clone(),
-            self.skip(),
+            &self.options.scan_options(),
         )
         .await?;
         let Some(dataset) = opened else {
             return Ok(Arc::new(Schema::empty()));
         };
-        let schema = any_dataset_to_arrow_schema(&AnyDataset::Regular(dataset))
-            .map_err(|e| exec_datafusion_err!("failed to derive the Arrow schema: {e}"))?;
-        Ok(Arc::new(schema))
+        Ok(Arc::new(beacon_nd_scan::file_schema(dataset.as_ref())))
+    }
+
+    /// The statistics of one file for the columns of `table_schema`.
+    async fn file_statistics(
+        &self,
+        store: &Arc<dyn ObjectStore>,
+        object: &ObjectMeta,
+        table_schema: &Schema,
+    ) -> Result<Statistics> {
+        let dataset = NetcdfOpener
+            .open(Arc::clone(store), object)
+            .await
+            .map_err(to_datafusion)?;
+        file_statistics(dataset.as_ref(), table_schema).await
     }
 
     /// The plan that writes one variable per column, on one `obs` dimension.
@@ -231,18 +241,17 @@ impl FileFormat for NetcdfFormat {
             return Ok(Statistics::new_unknown(&table_schema));
         }
         tracing::trace!(object = %object.location, "generating statistics for NetCDF file");
-        Ok(
-            statistics::generate_statistics(store, object, &table_schema)
-                .await
-                .unwrap_or_else(|e| {
-                    tracing::warn!(
-                        "Failed to generate statistics for object {}: {}",
-                        object.location,
-                        e
-                    );
-                    Statistics::new_unknown(&table_schema)
-                }),
-        )
+        Ok(self
+            .file_statistics(store, object, &table_schema)
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!(
+                    "Failed to generate statistics for object {}: {}",
+                    object.location,
+                    e
+                );
+                Statistics::new_unknown(&table_schema)
+            }))
     }
 
     async fn create_physical_plan(
@@ -261,22 +270,20 @@ impl FileFormat for NetcdfFormat {
                 partition_columns.join(", ")
             )));
         }
-        // The scan carries nd data as `beacon.nd`-encoded struct columns, so
-        // the file source's schema is the encoded form of the logical table
-        // schema. `NdSourceExec` decodes it and `NdBroadcastExec` broadcasts it
-        // back to the logical schema above the scan.
-        let table_schema =
-            TableSchema::from_file_schema(Arc::new(encoded_schema(conf.file_schema())));
         // Keep a projection that the scan pushed into the incoming source.
         let projection = conf.file_source().projection().cloned();
-        let source = self.source(table_schema).with_projection(projection);
+        if projection.as_ref().is_some_and(names_no_column) {
+            return plan_err!(
+                "a NetCDF scan needs at least one file column; use COUNT(column) in place of COUNT(*)"
+            );
+        }
+        let source = self
+            .source(encoded_table_schema(conf.file_schema()))
+            .with_projection(projection);
         let conf = FileScanConfigBuilder::from(conf)
             .with_source(Arc::new(source))
             .build();
-
-        let data_source: Arc<dyn ExecutionPlan> = DataSourceExec::from_data_source(conf);
-        let nd_source = Arc::new(NdSourceExec::try_new(data_source)?);
-        Ok(Arc::new(NdBroadcastExec::try_new(nd_source)?))
+        nd_scan_plan(conf)
     }
 
     async fn create_writer_physical_plan(
@@ -298,6 +305,13 @@ impl FileFormat for NetcdfFormat {
     fn file_source(&self, table_schema: TableSchema) -> Arc<dyn FileSource> {
         Arc::new(self.source(table_schema))
     }
+}
+
+/// Whether `projection` reads no column, as `COUNT(*)` does. A NetCDF table has no partition column.
+fn names_no_column(projection: &ProjectionExprs) -> bool {
+    projection
+        .iter()
+        .all(|item| collect_columns(&item.expr).is_empty())
 }
 
 #[cfg(test)]
