@@ -1263,6 +1263,7 @@ dependencies = [
  "beacon-json-query",
  "beacon-lance",
  "beacon-nd-execution",
+ "beacon-nd-scan",
  "beacon-plugin-formats",
  "beacon-plugin-registry",
  "beacon-plugin-sdk",

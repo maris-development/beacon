@@ -381,14 +381,19 @@ mod tests {
     #[test]
     fn a_sliced_file_counts_once() {
         use arrow::datatypes::{DataType, Field, Schema};
-        use beacon_arrow_netcdf::datafusion::NetcdfSource;
+        use beacon_arrow_netcdf::nd::NetcdfOpener;
+        use beacon_nd_scan::{NdScanOptions, NdSource};
         use datafusion::datasource::listing::PartitionedFile;
         use datafusion::datasource::physical_plan::{FileGroup, FileScanConfigBuilder};
         use datafusion::datasource::table_schema::TableSchema;
         use datafusion::execution::object_store::ObjectStoreUrl;
 
         let schema = Arc::new(Schema::new(vec![Field::new("V0", DataType::Float64, true)]));
-        let source = NetcdfSource::new(None, TableSchema::from_file_schema(schema));
+        let source = NdSource::new(
+            Arc::new(NetcdfOpener),
+            NdScanOptions::default(),
+            TableSchema::from_file_schema(schema),
+        );
         // Four entries of one file, as four slices give.
         let groups = (0..4)
             .map(|_| FileGroup::new(vec![PartitionedFile::new("data/a.nc", 1000)]))

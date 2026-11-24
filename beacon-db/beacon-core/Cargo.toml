@@ -102,3 +102,5 @@ flate2 = { workspace = true }
 tracing-subscriber = { workspace = true }
 # Unpacks the zipped Zarr stores that the zarr output format returns.
 zip = { workspace = true }
+# Builds the NetCDF scan source of the scan-totals test.
+beacon-nd-scan = { path = "../beacon-nd/beacon-nd-scan" }
