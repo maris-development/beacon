@@ -158,17 +158,40 @@ impl Decode {
     }
 }
 
+/// The side of a range that [`time_bound`] gives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BoundSide {
+    Lower,
+    Upper,
+}
+
+/// 2^53: above it, an `f64` does not hold every integer.
+const EXACT_F64_INTEGERS: f64 = 9_007_199_254_740_992.0;
+
 /// The decoded instant of one stored time offset, for the `actual_range` shortcut.
 /// `None` when `data_type` is not a timestamp, or the instant is out of range.
+///
+/// A nanosecond bound moves outward to the `side`, so that it contains the stored
+/// `i64` that `value` approximates. A microsecond bound is the instant that `apply` gives.
 pub(crate) fn time_bound(
     data_type: &DataType,
     attributes: &Attributes,
     value: f64,
+    side: BoundSide,
 ) -> Option<ScalarValue> {
     match data_type {
         DataType::Timestamp(TimeUnit::Nanosecond, _) => {
             let reference_nanos = nano_reference(attributes)?;
-            let offset = value.round();
+            // Above 2^53 the stored integer is within one `f64` step of `value`.
+            let widened = match side {
+                BoundSide::Lower if value.abs() >= EXACT_F64_INTEGERS => value.next_down(),
+                BoundSide::Upper if value.abs() >= EXACT_F64_INTEGERS => value.next_up(),
+                _ => value,
+            };
+            let offset = match side {
+                BoundSide::Lower => widened.floor(),
+                BoundSide::Upper => widened.ceil(),
+            };
             // `i64::MAX as f64` is 2^63, one past the largest `i64`.
             if !(offset >= i64::MIN as f64 && offset < i64::MAX as f64) {
                 return None;
@@ -790,33 +813,71 @@ mod tests {
             let (decode, out) = decode(&raw);
             let expected = ScalarValue::try_from_array(out.values(), 0).unwrap();
             assert!(!expected.is_null(), "{decode:?}");
-            assert_eq!(
-                time_bound(out.data_type(), raw.attributes(), value),
-                Some(expected),
-                "{decode:?}"
+            for side in [BoundSide::Lower, BoundSide::Upper] {
+                assert_eq!(
+                    time_bound(out.data_type(), raw.attributes(), value, side),
+                    Some(expected.clone()),
+                    "{decode:?} {side:?}"
+                );
+            }
+        }
+    }
+
+    /// The `time_bound` of a nanosecond variable since 1970, as nanoseconds.
+    fn nano_bound(attributes: &Attributes, value: f64, side: BoundSide) -> Option<i64> {
+        let nanos = DataType::Timestamp(TimeUnit::Nanosecond, None);
+        match time_bound(&nanos, attributes, value, side) {
+            Some(ScalarValue::TimestampNanosecond(Some(v), None)) => Some(v),
+            None => None,
+            other => panic!("not a nanosecond timestamp: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_large_nanosecond_bound_contains_the_stored_value() {
+        let attributes = Attributes::new().with("units", "nanoseconds since 1970-01-01");
+        // The second value rounds up in `f64`, to 1_700_000_000_000_000_256.
+        for stored in [1_700_000_000_000_000_100_i64, 1_700_000_000_000_000_200] {
+            let value = stored as f64;
+            let lower = nano_bound(&attributes, value, BoundSide::Lower).unwrap();
+            let upper = nano_bound(&attributes, value, BoundSide::Upper).unwrap();
+            assert!(
+                lower <= stored && stored <= upper,
+                "{lower} {stored} {upper}"
             );
         }
     }
 
     #[test]
+    fn a_nanosecond_bound_that_overflows_is_none() {
+        let attributes = Attributes::new().with("units", "nanoseconds since 2000-01-01");
+        for side in [BoundSide::Lower, BoundSide::Upper] {
+            assert_eq!(nano_bound(&attributes, 9.0e18, side), None, "{side:?}");
+        }
+    }
+
+    #[test]
     fn the_time_bound_of_a_number_type_is_none() {
-        assert_eq!(
-            time_bound(&DataType::Float64, time().attributes(), 1.0),
-            None
-        );
+        for side in [BoundSide::Lower, BoundSide::Upper] {
+            assert_eq!(
+                time_bound(&DataType::Float64, time().attributes(), 1.0, side),
+                None
+            );
+        }
     }
 
     #[test]
     fn an_out_of_range_time_bound_is_none() {
-        let nanos = DataType::Timestamp(TimeUnit::Nanosecond, None);
         let overflow = nanosecond_overflow();
-        assert_eq!(
-            time_bound(&nanos, overflow.attributes(), i64::MAX as f64),
-            None
-        );
-        assert_eq!(
-            time_bound(&timestamp_type(), time().attributes(), 1e300),
-            None
-        );
+        for side in [BoundSide::Lower, BoundSide::Upper] {
+            assert_eq!(
+                nano_bound(overflow.attributes(), i64::MAX as f64, side),
+                None
+            );
+            assert_eq!(
+                time_bound(&timestamp_type(), time().attributes(), 1e300, side),
+                None
+            );
+        }
     }
 }
