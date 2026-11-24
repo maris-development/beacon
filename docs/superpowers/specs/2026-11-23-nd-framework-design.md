@@ -593,6 +593,10 @@ next entry. This balance needs more entries than partitions.
   is the size of all unsliced files.
 - The count is at least 1 and at most `A`. A count of 1 leaves the file whole.
 - When `total` is 0, each file gets `ceil(A / files)` slices.
+- A slice is not smaller than `datafusion.optimizer.repartition_file_min_size`
+  bytes, 10 MiB by default. So a file gets at most `size / minimum` slices.
+  The minimum does not apply to a file of size 0, because that size is not
+  known.
 
 `NdSource::reorder_files` sorts the shared queue by weight, the largest entry
 first. The weight of an entry is the size of its file divided by its slice

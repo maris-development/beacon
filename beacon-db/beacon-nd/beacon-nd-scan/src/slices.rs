@@ -63,7 +63,12 @@ const ENTRIES_PER_PARTITION: usize = 4;
 ///
 /// The aim is `ENTRIES_PER_PARTITION * target` entries of equal size. A file
 /// smaller than one such entry stays whole, and no file gets more slices than the aim.
-pub(crate) fn slice_files(entries: Vec<PartitionedFile>, target: usize) -> Vec<PartitionedFile> {
+/// A slice of a file with a known size is not smaller than `min_slice_size` bytes.
+pub(crate) fn slice_files(
+    entries: Vec<PartitionedFile>,
+    target: usize,
+    min_slice_size: u64,
+) -> Vec<PartitionedFile> {
     let unsliced = || {
         entries
             .iter()
@@ -84,7 +89,12 @@ pub(crate) fn slice_files(entries: Vec<PartitionedFile>, target: usize) -> Vec<P
             sliced.push(entry);
             continue;
         }
-        let count = slice_count(entry.object_meta.size, total, files, aim);
+        let size = entry.object_meta.size;
+        let mut count = slice_count(size, total, files, aim);
+        // A size of 0 is not known, so the minimum does not apply.
+        if let Some(most) = size.checked_div(min_slice_size).filter(|_| size > 0) {
+            count = count.min(most.clamp(1, u64::from(u32::MAX)) as u32);
+        }
         if count == 1 {
             sliced.push(entry);
             continue;
@@ -196,7 +206,7 @@ mod tests {
 
     #[test]
     fn files_of_equal_size_share_the_aim() {
-        let sliced = slice_files(vec![file("a.nc", 100), file("b.nc", 100)], 2);
+        let sliced = slice_files(vec![file("a.nc", 100), file("b.nc", 100)], 2, 0);
 
         // The aim is 4 * 2 = 8 entries: 4 slices for each file.
         assert_eq!(sliced.len(), 8);
@@ -215,7 +225,7 @@ mod tests {
 
     #[test]
     fn a_lone_file_gets_the_full_aim() {
-        let sliced = slice_files(vec![file("a.nc", 100)], 8);
+        let sliced = slice_files(vec![file("a.nc", 100)], 8, 0);
         assert_eq!(sliced.len(), 32);
         assert_eq!(counts(&sliced), vec![("a.nc".to_string(), 32)]);
     }
@@ -223,7 +233,7 @@ mod tests {
     #[test]
     fn enough_files_of_equal_size_are_not_sliced() {
         let entries: Vec<PartitionedFile> = (0..32).map(|i| file(&format!("{i}.nc"), 10)).collect();
-        let kept = slice_files(entries, 4);
+        let kept = slice_files(entries, 4, 0);
         assert_eq!(kept.len(), 32);
         assert!(
             kept.iter()
@@ -236,7 +246,7 @@ mod tests {
         let mut entries = vec![file("big.nc", 50_000)];
         entries.extend((0..40).map(|i| file(&format!("s{i}.nc"), 100)));
 
-        let sliced = slice_files(entries, 8);
+        let sliced = slice_files(entries, 8, 0);
 
         // The aim is 32 entries of 1687.5 bytes: round(50000 / 1687.5) = 30.
         let counts = counts(&sliced);
@@ -253,7 +263,11 @@ mod tests {
 
     #[test]
     fn files_of_unknown_size_get_the_same_count() {
-        let sliced = slice_files(vec![file("a.nc", 0), file("b.nc", 0), file("c.nc", 0)], 2);
+        let sliced = slice_files(
+            vec![file("a.nc", 0), file("b.nc", 0), file("c.nc", 0)],
+            2,
+            0,
+        );
 
         // The aim is 8 entries: ceil(8 / 3) = 3 slices for each file.
         assert_eq!(sliced.len(), 9);
@@ -262,7 +276,7 @@ mod tests {
 
     #[test]
     fn an_empty_file_among_sized_files_stays_whole() {
-        let sliced = slice_files(vec![file("a.nc", 100), file("empty.nc", 0)], 2);
+        let sliced = slice_files(vec![file("a.nc", 100), file("empty.nc", 0)], 2, 0);
         assert_eq!(
             counts(&sliced),
             vec![("a.nc".to_string(), 8), ("empty.nc".to_string(), 1)]
@@ -271,20 +285,43 @@ mod tests {
 
     #[test]
     fn a_huge_size_does_not_overflow() {
-        let sliced = slice_files(vec![file("a.nc", u64::MAX), file("b.nc", u64::MAX)], 2);
+        let sliced = slice_files(vec![file("a.nc", u64::MAX), file("b.nc", u64::MAX)], 2, 0);
         assert_eq!(sliced.len(), 8);
     }
 
     #[test]
     fn a_slice_is_not_sliced_again() {
-        let once = slice_files(vec![file("a.nc", 100)], 4);
-        let twice = slice_files(once.clone(), 16);
+        let once = slice_files(vec![file("a.nc", 100)], 4, 0);
+        let twice = slice_files(once.clone(), 16, 0);
         assert_eq!(twice.len(), once.len());
     }
 
     #[test]
     fn no_entry_gives_no_slice() {
-        assert!(slice_files(vec![], 8).is_empty());
+        assert!(slice_files(vec![], 8, 0).is_empty());
+    }
+
+    #[test]
+    fn a_slice_is_not_smaller_than_the_minimum_size() {
+        // The aim is 32 slices. A minimum of 100 bytes allows 10, 2 and 1.
+        for (size, expected) in [(1000, 10), (250, 2), (199, 1), (50, 1)] {
+            let sliced = slice_files(vec![file("a.nc", size)], 8, 100);
+            assert_eq!(sliced.len(), expected, "{size} bytes");
+        }
+    }
+
+    #[test]
+    fn a_minimum_above_the_file_size_leaves_the_file_whole() {
+        let sliced = slice_files(vec![file("a.nc", 1000)], 8, u64::MAX);
+        assert_eq!(sliced.len(), 1);
+        assert!(sliced[0].extension::<NdSlice>().is_none());
+        assert!(sliced[0].statistics.is_none());
+    }
+
+    #[test]
+    fn the_minimum_size_does_not_apply_to_an_unknown_size() {
+        let sliced = slice_files(vec![file("a.nc", 0)], 2, 100);
+        assert_eq!(sliced.len(), 8);
     }
 
     #[test]
@@ -292,6 +329,7 @@ mod tests {
         let entries = slice_files(
             vec![file("s1.nc", 100), file("big.nc", 1500), file("s2.nc", 100)],
             1,
+            0,
         );
 
         let order: Vec<(String, u32)> = largest_first(entries)

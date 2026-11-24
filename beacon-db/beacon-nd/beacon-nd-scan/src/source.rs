@@ -146,10 +146,11 @@ impl FileSource for NdSource {
 
     /// Slice each file in proportion to its size, and spread the entries over
     /// `target_partitions` groups. A file is never cut by byte range.
+    /// `repartition_file_min_size` is the minimum size of one slice.
     fn repartitioned(
         &self,
         target_partitions: usize,
-        _repartition_file_min_size: usize,
+        repartition_file_min_size: usize,
         output_ordering: Option<LexOrdering>,
         config: &FileScanConfig,
     ) -> Result<Option<FileScanConfig>> {
@@ -166,7 +167,7 @@ impl FileSource for NdSource {
         let entries = if config.limit.is_some() {
             entries
         } else {
-            slice_files(entries, target_partitions)
+            slice_files(entries, target_partitions, repartition_file_min_size as u64)
         };
         let mut config = config.clone();
         config.file_groups = spread_files(entries, target_partitions);
@@ -352,6 +353,26 @@ mod tests {
                 .is_none(),
             "an ordered scan must keep its single group"
         );
+    }
+
+    #[test]
+    fn the_minimum_file_size_of_the_session_limits_the_slices() {
+        let source = source("V0");
+
+        // One file of 1000 bytes: a minimum of 400 bytes allows two slices.
+        let planned = source
+            .repartitioned(4, 400, None, &config_of(&source, 1).build())
+            .unwrap()
+            .expect("the scan repartitions");
+
+        assert_eq!(planned.file_groups.len(), 4);
+        let entries: Vec<&PartitionedFile> = planned
+            .file_groups
+            .iter()
+            .flat_map(|group| group.files())
+            .collect();
+        assert_eq!(entries.len(), 2);
+        assert!(entries.iter().all(|entry| NdSlice::of(entry).count() == 2));
     }
 
     #[test]
