@@ -5,6 +5,8 @@
 //! returns the result as an [`AnyDataset`]. Variable data is read on demand —
 //! only metadata is touched here.
 //!
+//! [`schema_from_group_path`] opens each leaf group through the ND scan instead.
+//!
 //! # Naming conventions
 //! - Each child array becomes a named column.
 //! - Per-array attributes are surfaced as `"{array}.{attr}"` columns.
@@ -16,14 +18,20 @@ use arrow::datatypes::SchemaRef;
 use beacon_datafusion_ext::type_widening::{ArrowTypeWidening, LabeledSchema};
 use beacon_nd_array::{
     NdArrayD,
-    arrow::schema::any_dataset_to_arrow_schema,
     dataset::{AnyDataset, Dataset},
 };
+use beacon_nd_scan::{file_schema, open_for_read};
 use indexmap::IndexMap;
+use object_store::{ObjectMeta, ObjectStore, memory::InMemory, path::Path};
 use zarrs::group::Group;
 use zarrs_storage::AsyncReadableListableStorageTraits;
 
-use crate::{attributes::AttributeValue, compat, util::recursive_groups};
+use crate::{
+    attributes::AttributeValue,
+    compat,
+    datafusion::opener::{ZarrOpener, scan_options},
+    util::{NOMINAL_GROUP_SIZE, ZarrStorage, group_metadata_key, recursive_groups},
+};
 
 pub use beacon_nd_array::dataset::{project_read_dimensions, project_read_dimensions_or_skip};
 
@@ -37,43 +45,49 @@ pub use beacon_nd_array::dataset::{project_read_dimensions, project_read_dimensi
 /// [`session_widening`]. One store then merges by the rule that the stores of a
 /// table and the files of every other format use.
 ///
+/// Each leaf opens as the ND scan opens it, so the schema matches what the scan
+/// reads. `_log_label` is not used: the ND open logs each skipped leaf.
+///
 /// [`session_widening`]: beacon_datafusion_ext::type_widening::session_widening
 pub async fn schema_from_group_path(
     storage: Arc<dyn AsyncReadableListableStorageTraits>,
     group_path: &str,
     read_dimensions: Option<Vec<String>>,
     skip_unbroadcastable: bool,
-    log_label: Option<&str>,
+    _log_label: Option<&str>,
     widening: &ArrowTypeWidening,
 ) -> anyhow::Result<SchemaRef> {
-    let group = Group::async_open(storage, group_path)
+    let group = Group::async_open(storage.clone(), group_path)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to open Zarr group at '{group_path}': {e}"))?;
 
     let mut leaves = Vec::new();
     recursive_groups(Arc::new(group), &mut leaves).await?;
 
+    let opener = ZarrOpener::new(Some(ZarrStorage::new(storage)));
+    let options = scan_options(read_dimensions, skip_unbroadcastable);
+    // The opener reads the storage above, so it never reads this store.
+    let unused_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     let mut schemas = Vec::new();
     let mut skipped = 0usize;
     for leaf in leaves {
         // The group path names the leaf, so a refused column names both leaves.
         let leaf_path = leaf.path().as_str().to_string();
-        let dataset = dataset_from_group(&leaf, None)
+        let meta = ObjectMeta {
+            location: Path::from(group_metadata_key(&leaf_path)),
+            last_modified: Default::default(),
+            size: NOMINAL_GROUP_SIZE,
+            e_tag: None,
+            version: None,
+        };
+        let Some(dataset) = open_for_read(&opener, unused_store.clone(), &meta, &options)
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to read Zarr group as dataset: {e}"))?;
-        // Match what the scan returns: the same narrowing runs per partition.
-        let Some(dataset) = project_read_dimensions_or_skip(
-            dataset,
-            read_dimensions.clone(),
-            skip_unbroadcastable,
-            log_label,
-        )?
+            .map_err(|e| anyhow::anyhow!("Failed to read Zarr group as dataset: {e}"))?
         else {
             skipped += 1;
             continue;
         };
-        let schema = any_dataset_to_arrow_schema(&dataset)
-            .map_err(|e| anyhow::anyhow!("Failed to derive Zarr Arrow schema: {e}"))?;
+        let schema = file_schema(dataset.as_ref());
         schemas.push(LabeledSchema::new(Arc::new(schema), leaf_path));
     }
 
@@ -203,120 +217,21 @@ pub async fn dataset_and_attributes_from_group(
 mod tests {
     use std::sync::Arc;
 
-    use beacon_nd_array::{NdArray, datatypes::NdArrayDataType};
+    use arrow::datatypes::DataType;
+    use beacon_nd_dataset::{NdDataset, Region};
     use object_store::local::LocalFileSystem;
-    use zarrs::group::Group;
     use zarrs_object_store::AsyncObjectStore;
-    use zarrs_storage::AsyncReadableListableStorage;
 
-    use super::*;
-
-    async fn open_example() -> AnyDataset {
-        let local_fs = LocalFileSystem::new_with_prefix("./test_files").unwrap();
-        let object_store = AsyncObjectStore::new(local_fs);
-        let zarr_store: AsyncReadableListableStorage = Arc::new(object_store);
-        let group = Group::async_open(zarr_store, "/gridded-example.zarr")
-            .await
-            .unwrap();
-        dataset_from_group(&group, None).await.unwrap()
-    }
-
-    #[tokio::test]
-    async fn dataset_contains_coordinate_and_data_arrays() {
-        let any = open_example().await;
-        assert!(any.get_array("lat").is_some());
-        assert!(any.get_array("lon").is_some());
-        assert!(any.get_array("analysed_sst").is_some());
-    }
-
-    #[tokio::test]
-    async fn time_coordinate_decodes_to_timestamp() {
-        let any = open_example().await;
-        let time = any.get_array("time").expect("time array");
-        assert_eq!(time.datatype(), NdArrayDataType::Timestamp);
-    }
+    use crate::nd::open_group;
 
     #[tokio::test]
     async fn lat_values_are_readable() {
-        let any = open_example().await;
-        let lat = any
-            .get_array("lat")
-            .expect("lat array")
-            .as_any()
-            .downcast_ref::<NdArray<f32>>()
-            .expect("lat is f32");
-        let raw = lat.clone_into_raw_vec().await;
-        assert!(!raw.is_empty());
-    }
-
-    #[tokio::test]
-    async fn predicate_pushdown_prunes_chunks() {
-        use beacon_nd_array::arrow::{
-            file_read::flat_stream, pushdown_filter::PushdownFilter,
-            schema::any_dataset_to_arrow_schema,
-        };
-        use datafusion::logical_expr::Operator;
-        use datafusion::physical_expr::expressions::{binary, col, lit};
-        use datafusion::scalar::ScalarValue;
-        use futures::TryStreamExt;
-        use std::sync::Arc;
-
-        async fn row_count(predicate: Option<PushdownFilter>) -> usize {
-            let any = open_example().await;
-            flat_stream(any, usize::MAX, predicate)
-                .await
-                .unwrap()
-                .try_collect::<Vec<_>>()
-                .await
-                .unwrap()
-                .iter()
-                .map(|b| b.num_rows())
-                .sum()
-        }
-
-        // Determine the latitude range from the data.
-        let any = open_example().await;
-        let lat_vals = any
-            .get_array("lat")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<NdArray<f32>>()
-            .unwrap()
-            .clone_into_raw_vec()
-            .await;
-        let lat_min = lat_vals.iter().cloned().fold(f32::INFINITY, f32::min);
-        let lat_max = lat_vals.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-        let schema = Arc::new(any_dataset_to_arrow_schema(&any).unwrap());
-
-        let total = row_count(None).await;
-        assert!(total > 0, "baseline scan should produce rows");
-
-        // An impossible predicate (lat above the max) must prune every chunk.
-        let impossible = binary(
-            col("lat", &schema).unwrap(),
-            Operator::Gt,
-            lit(ScalarValue::Float32(Some(lat_max + 1000.0))),
-            &schema,
-        )
-        .unwrap();
-        assert_eq!(
-            row_count(Some(PushdownFilter::new(impossible))).await,
-            0,
-            "an impossible lat predicate should prune all chunks"
-        );
-
-        // A permissive predicate (lat >= min) must keep every row.
-        let permissive = binary(
-            col("lat", &schema).unwrap(),
-            Operator::GtEq,
-            lit(ScalarValue::Float32(Some(lat_min))),
-            &schema,
-        )
-        .unwrap();
-        assert_eq!(
-            row_count(Some(PushdownFilter::new(permissive))).await,
-            total,
-            "a permissive lat predicate should not prune any rows"
-        );
+        let local = LocalFileSystem::new_with_prefix("./test_files").unwrap();
+        let storage = Arc::new(AsyncObjectStore::new(local));
+        let dataset = open_group(storage, "/gridded-example.zarr").await.unwrap();
+        let lat = dataset.variable("lat").expect("lat array");
+        let values = lat.read(&Region::full(lat.dimensions())).await.unwrap();
+        assert_eq!(values.values().data_type(), &DataType::Float32);
+        assert!(!values.values().is_empty());
     }
 }

@@ -2,8 +2,8 @@
 //!
 //! Mirrors the netcdf/tiff/atlas crates: a [`ZarrFormatFactory`] discovers
 //! zarr stores, [`ZarrFormat`] infers the merged Arrow schema and plans
-//! the scan, and [`ZarrSource`] streams each leaf group through the shared
-//! `beacon-nd-array` engine with predicate pushdown.
+//! the scan, and [`zarr_source`] reads each leaf group through the ND scan of
+//! `beacon-nd-scan`.
 
 use std::{path::PathBuf, sync::Arc};
 
@@ -13,6 +13,7 @@ use beacon_datafusion_ext::format_ext::{
 };
 use beacon_datafusion_ext::format_options::format_option;
 use beacon_datafusion_ext::type_widening::{LabeledSchema, session_widening};
+use beacon_nd_scan::encoded_table_schema;
 use datafusion::{
     catalog::Session,
     common::{GetExt, Statistics},
@@ -42,12 +43,10 @@ use crate::{
 
 pub mod opener;
 pub mod sink;
-pub mod source;
 pub mod statistics;
 
 pub use opener::{ZarrOpener, zarr_source};
 pub use sink::ZarrSink;
-pub use source::ZarrSource;
 
 /// Parse a boolean value supplied through a `CREATE EXTERNAL TABLE` option.
 fn parse_bool_option(key: &str, value: &str) -> datafusion::error::Result<bool> {
@@ -473,7 +472,19 @@ impl FileFormat for ZarrFormat {
         state: &dyn Session,
         conf: FileScanConfig,
     ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
-        beacon_nd_array::arrow::morsel::reject_partition_columns("Zarr", &conf)?;
+        let partition_columns: Vec<&str> = conf
+            .table_partition_cols()
+            .iter()
+            .map(|field| field.name().as_str())
+            .collect();
+        if !partition_columns.is_empty() {
+            return Err(datafusion::error::DataFusionError::NotImplemented(format!(
+                "Zarr does not support partitioned tables (PARTITIONED BY {}). \
+                 A partition column is part of a file's path, and this reader scans a \
+                 collection as one unit, so it cannot tell which file a row came from.",
+                partition_columns.join(", ")
+            )));
+        }
 
         let mut object_metas: Vec<ObjectMeta> = Vec::new();
         for group in &conf.file_groups {
@@ -494,25 +505,15 @@ impl FileFormat for ZarrFormat {
             file_groups.push(file);
         }
 
-        // The scan carries nd data as `beacon.nd`-encoded struct columns, so the
-        // file source's schema is the encoded form of the logical table schema.
-        let encoded_file_schema = Arc::new(beacon_datafusion_ext::nd::encoded_schema(
-            conf.file_schema(),
-        ));
-        let table_schema = datafusion::datasource::table_schema::TableSchema::new(
-            encoded_file_schema,
-            conf.table_partition_cols().clone(),
-        );
-        // Preserve a projection that the scan pushed down into the incoming
-        // source — rebuilding the source below would otherwise drop it.
+        // Keep a projection that the scan pushed into the incoming source.
         let projection = conf.file_source().projection().cloned();
-        let mut source = ZarrSource::new(table_schema)
-            .with_read_dimensions(self.read_dimensions.clone())
-            .with_skip_unbroadcastable(self.skip_unbroadcastable)
-            .with_projection(projection);
-        if let Some(storage) = &self.storage {
-            source = source.with_storage(storage.clone());
-        }
+        let source = zarr_source(
+            encoded_table_schema(conf.file_schema()),
+            self.read_dimensions.clone(),
+            self.skip_unbroadcastable,
+            self.storage.clone(),
+        )
+        .with_projection(projection);
         let conf = FileScanConfigBuilder::from(conf)
             .with_file_groups(file_groups)
             .with_source(Arc::new(source))
@@ -543,13 +544,12 @@ impl FileFormat for ZarrFormat {
         &self,
         table_schema: datafusion::datasource::table_schema::TableSchema,
     ) -> Arc<dyn FileSource> {
-        let mut source = ZarrSource::new(table_schema)
-            .with_read_dimensions(self.read_dimensions.clone())
-            .with_skip_unbroadcastable(self.skip_unbroadcastable);
-        if let Some(storage) = &self.storage {
-            source = source.with_storage(storage.clone());
-        }
-        Arc::new(source)
+        Arc::new(zarr_source(
+            table_schema,
+            self.read_dimensions.clone(),
+            self.skip_unbroadcastable,
+            self.storage.clone(),
+        ))
     }
 }
 
@@ -602,7 +602,7 @@ mod tests {
     use datafusion::prelude::SessionContext;
     use std::collections::HashMap;
 
-    use super::{ZarrConfig, ZarrFormat, ZarrFormatFactory, ZarrSource, parse_bool_option};
+    use super::{ZarrConfig, ZarrFormat, ZarrFormatFactory, parse_bool_option};
 
     /// Register the bundled `gridded-example.zarr` store as a DataFusion table
     /// backed by [`ZarrFormat`] + [`ListingTable`].
@@ -697,12 +697,13 @@ mod tests {
         let above = lats.iter().cloned().fold(f32::MIN, f32::max);
         let middle = (lats.iter().cloned().fold(f32::MAX, f32::min) + above) / 2.0;
 
-        let whole = chunks_read("SELECT lat FROM gridded").await;
+        // `analysed_sst` puts the scan on the chunked (time, lat, lon) grid.
+        let whole = chunks_read("SELECT lat, analysed_sst FROM gridded").await;
         assert!(whole > 1, "the fixture must hold several chunks");
 
         assert_eq!(
             chunks_read(&format!(
-                "SELECT lat FROM gridded WHERE lat > {}",
+                "SELECT lat, analysed_sst FROM gridded WHERE lat > {}",
                 above + 1.0
             ))
             .await,
@@ -710,12 +711,15 @@ mod tests {
             "a predicate no row can meet must leave the scan nothing to read"
         );
         assert_eq!(
-            chunks_read("SELECT lat FROM gridded WHERE lat > -1000").await,
+            chunks_read("SELECT lat, analysed_sst FROM gridded WHERE lat > -1000").await,
             whole,
             "a predicate every row meets must not skip a chunk"
         );
 
-        let partial = chunks_read(&format!("SELECT lat FROM gridded WHERE lat > {middle}")).await;
+        let partial = chunks_read(&format!(
+            "SELECT lat, analysed_sst FROM gridded WHERE lat > {middle}"
+        ))
+        .await;
         assert!(
             partial > 0 && partial < whole,
             "lat > {middle} should read some of the {whole} chunks, it read {partial}"
@@ -755,29 +759,27 @@ mod tests {
         )
     }
 
-    /// One group is planned across every partition, through the queue.
+    /// One group is planned across every partition, in slices.
     ///
-    /// Size decides nothing here, and never did for Zarr: a leaf group's nominal
-    /// size is a `zarr.json` of a few KB that can front terabytes of chunks, so
-    /// the 10 MB minimum below would decline a store of any size. The caller
-    /// passes one anyway, and it must still be ignored.
-    ///
-    /// What changed is *how* the partitions divide it. They used to each hold
-    /// the group with a share between them; now the scan plans one standing
-    /// entry per partition and the group sits in a [`MorselSource`] they all
-    /// draw from. Either way one group reaches every partition and is read once.
+    /// Size decides nothing here: a leaf group's nominal size is a `zarr.json`
+    /// of a few KB that can front terabytes of chunks, so the 10 MB minimum
+    /// below would decline a store of any size. The caller passes one anyway,
+    /// and it must still be ignored.
     #[test]
     fn one_group_is_planned_across_every_partition() {
+        use beacon_nd_scan::encoded_table_schema;
         use datafusion::datasource::listing::PartitionedFile;
         use datafusion::datasource::physical_plan::{FileScanConfigBuilder, FileSource};
-        use datafusion::datasource::table_schema::TableSchema;
         use datafusion::execution::object_store::ObjectStoreUrl;
 
         const PARTITIONS: usize = 4;
 
-        let table_schema =
-            TableSchema::from_file_schema(Arc::new(arrow::datatypes::Schema::empty()));
-        let source = ZarrSource::new(table_schema);
+        let source = super::zarr_source(
+            encoded_table_schema(&arrow::datatypes::Schema::empty()),
+            None,
+            false,
+            None,
+        );
         let config = FileScanConfigBuilder::new(
             ObjectStoreUrl::local_filesystem(),
             Arc::new(source.clone()) as Arc<dyn FileSource>,
@@ -796,25 +798,8 @@ mod tests {
             .expect("a zarr group is planned across the partitions");
 
         assert_eq!(planned.file_groups.len(), PARTITIONS);
-        for group in &planned.file_groups {
-            assert_eq!(group.len(), 1, "one standing entry per partition");
-            assert!(
-                group.iter().next().unwrap().range.is_none(),
-                "nothing is divided at plan time; the partitions divide it as \
-                 they read it"
-            );
-        }
-
-        // The queue is what stops every partition reading the whole group.
-        let planned_source = planned
-            .file_source()
-            .downcast_ref::<ZarrSource>()
-            .expect("the config carries a ZarrSource");
-        assert_eq!(
-            planned_source.morsel_groups(),
-            Some(1),
-            "the group is in the queue the openers draw from"
-        );
+        let entries: usize = planned.file_groups.iter().map(|group| group.len()).sum();
+        assert_eq!(entries, 16, "four slices of the one group per partition");
     }
 
     /// One group scans in several partitions and returns the same rows it
@@ -1211,11 +1196,11 @@ mod tests {
             .await
             .unwrap();
 
-        // CF time must surface as a nanosecond timestamp through the plan.
+        // CF time must surface as a microsecond timestamp through the plan.
         let time_field = df.schema().field_with_unqualified_name("time").unwrap();
         assert_eq!(
             time_field.data_type(),
-            &DataType::Timestamp(TimeUnit::Nanosecond, None)
+            &DataType::Timestamp(TimeUnit::Microsecond, None)
         );
 
         let batches = df.collect().await.unwrap();
@@ -1378,7 +1363,7 @@ mod tests {
         // `time` is int32 "seconds since 1981-01-01" → CF time.
         assert_eq!(
             dtype("time"),
-            DataType::Timestamp(TimeUnit::Nanosecond, None)
+            DataType::Timestamp(TimeUnit::Microsecond, None)
         );
         // `analysed_sst` is int16 with scale_factor/add_offset → decoded f64.
         assert_eq!(dtype("analysed_sst"), DataType::Float64);
@@ -1608,6 +1593,114 @@ mod tests {
             int("grid_rows"),
             "attribute must be broadcast (non-null) onto every grid row"
         );
+    }
+
+    /// `COUNT(*)` reads no column and still counts each row of the grid of
+    /// `SELECT *`. `analysed_sst` spans that whole (time, lat, lon) grid.
+    #[tokio::test]
+    async fn count_star_counts_the_grid_rows() {
+        let ctx = SessionContext::new();
+        register_example(&ctx).await;
+
+        let counted = ctx
+            .sql("SELECT COUNT(*) FROM gridded")
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+        let count = counted[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<arrow::array::Int64Array>()
+            .unwrap()
+            .value(0) as usize;
+
+        let rows: usize = ctx
+            .sql("SELECT analysed_sst FROM gridded")
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap()
+            .iter()
+            .map(|batch| batch.num_rows())
+            .sum();
+        assert_eq!(count, rows);
+    }
+
+    /// A microsecond time and a nanosecond time merge into one nanosecond column,
+    /// and each store keeps its exact instants.
+    #[tokio::test]
+    async fn two_stores_with_micro_and_nano_time_merge() {
+        use arrow::array::TimestampNanosecondArray;
+        use arrow::compute::concat_batches;
+        use datafusion::execution::object_store::ObjectStoreUrl;
+        use serde_json::json;
+
+        use crate::nd::testing::{TestStore, write_array, write_group};
+
+        let store = TestStore::new();
+        write_group(&store, "/data/micro.zarr", json!({})).await;
+        write_array(
+            &store,
+            "/data/micro.zarr/time",
+            &[1],
+            &[1],
+            &[Some("time")],
+            json!({"units": "days since 1970-01-01"}),
+            vec![1.0f64],
+        )
+        .await;
+        write_group(&store, "/data/nano.zarr", json!({})).await;
+        write_array(
+            &store,
+            "/data/nano.zarr/time",
+            &[1],
+            &[1],
+            &[Some("time")],
+            json!({"units": "nanoseconds since 1970-01-02"}),
+            vec![5i64],
+        )
+        .await;
+
+        // The stores are folders under the table path.
+        let ctx =
+            SessionContext::new_with_config(datafusion::prelude::SessionConfig::new().set_bool(
+                "datafusion.execution.listing_table_ignore_subdirectory",
+                false,
+            ));
+        let url = ObjectStoreUrl::parse("memory://").unwrap();
+        ctx.register_object_store(url.as_ref(), store.object_store());
+        let listing_options =
+            ListingOptions::new(Arc::new(ZarrFormat::default())).with_file_extension("zarr.json");
+        let config = ListingTableConfig::new(ListingTableUrl::parse("memory:///data/").unwrap())
+            .with_listing_options(listing_options)
+            .infer_schema(&ctx.state())
+            .await
+            .unwrap();
+        let table = ListingTable::try_new(config).unwrap();
+        assert_eq!(
+            table.schema().field_with_name("time").unwrap().data_type(),
+            &DataType::Timestamp(TimeUnit::Nanosecond, None)
+        );
+        ctx.register_table("times", Arc::new(table)).unwrap();
+
+        let batches = ctx
+            .sql("SELECT time FROM times ORDER BY time")
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+        let batch = concat_batches(&batches[0].schema(), &batches).unwrap();
+        let times = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<TimestampNanosecondArray>()
+            .unwrap();
+        const DAY: i64 = 86_400_000_000_000;
+        assert_eq!(times.iter().collect::<Vec<_>>(), [Some(DAY), Some(DAY + 5)]);
     }
 }
 

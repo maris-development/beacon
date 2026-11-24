@@ -636,3 +636,72 @@ async fn copy_to_zarr_writes_a_directory_store() {
         .expect_err("an existing store should not be replaced");
     assert!(err.to_string().contains("already exists"), "{err}");
 }
+
+/// Copies the directory tree `from` to `to`.
+fn copy_dir(from: &std::path::Path, to: &std::path::Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for entry in std::fs::read_dir(from).unwrap().flatten() {
+        let target = to.join(entry.file_name());
+        if entry.path().is_dir() {
+            copy_dir(&entry.path(), &target);
+        } else {
+            std::fs::copy(entry.path(), target).unwrap();
+        }
+    }
+}
+
+/// A store that `COPY TO` wrote reads back with the same values and nulls,
+/// and its time column stays a nanosecond timestamp.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_beacon_written_store_reads_back_its_nulls() {
+    use arrow::array::{Int64Array, TimestampNanosecondArray, UInt64Array};
+    use arrow::datatypes::{DataType, TimeUnit};
+
+    let rt = runtime("zarr-nulls").await;
+    rt.sql("CREATE TABLE t (i BIGINT, u BIGINT UNSIGNED, ts TIMESTAMP)")
+        .await;
+    rt.sql(
+        "INSERT INTO t VALUES \
+         (1, NULL, '2020-01-01T00:00:00.000000001'), \
+         (2, 7, NULL), \
+         (NULL, 9, '2020-01-01T00:00:00.000000003')",
+    )
+    .await;
+    rt.sql("COPY (SELECT i, u, ts FROM t) TO 'tmp:///nulls.zarr' STORED AS ZARR")
+        .await;
+    copy_dir(
+        &rt.tmp_dir().join("nulls.zarr"),
+        &rt.datasets_dir().join("nulls.zarr"),
+    );
+
+    let rows = rt
+        .sql("SELECT i, u, ts FROM read_zarr(['nulls.zarr/']) ORDER BY i NULLS LAST")
+        .await;
+    let batch = arrow::compute::concat_batches(&rows[0].schema(), &rows).unwrap();
+    assert_eq!(
+        batch.schema().field(2).data_type(),
+        &DataType::Timestamp(TimeUnit::Nanosecond, None)
+    );
+    let i = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .unwrap();
+    assert_eq!(i.iter().collect::<Vec<_>>(), [Some(1), Some(2), None]);
+    let u = batch
+        .column(1)
+        .as_any()
+        .downcast_ref::<UInt64Array>()
+        .unwrap();
+    assert_eq!(u.iter().collect::<Vec<_>>(), [None, Some(7), Some(9)]);
+    let ts = batch
+        .column(2)
+        .as_any()
+        .downcast_ref::<TimestampNanosecondArray>()
+        .unwrap();
+    const NEW_YEAR_2020: i64 = 1_577_836_800_000_000_000;
+    assert_eq!(
+        ts.iter().collect::<Vec<_>>(),
+        [Some(NEW_YEAR_2020 + 1), None, Some(NEW_YEAR_2020 + 3)]
+    );
+}

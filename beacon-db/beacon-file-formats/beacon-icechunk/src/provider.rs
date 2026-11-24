@@ -2,16 +2,16 @@
 //! the zarr reader.
 //!
 //! The repository supplies the storage; everything above it — schema inference,
-//! the leaf-group walk, the `beacon-nd-array` scan and the predicate pushdown —
+//! the leaf-group walk, the ND scan and the predicate pushdown —
 //! is the same code a plain zarr store goes through.
 
 use std::sync::Arc;
 
 use anyhow::Context;
 use arrow::datatypes::SchemaRef;
-use beacon_arrow_zarr::datafusion::{ZarrSource, nd_scan_plan};
+use beacon_arrow_zarr::datafusion::{nd_scan_plan, zarr_source};
 use beacon_arrow_zarr::reader::schema_from_group_path;
-use beacon_arrow_zarr::util::{ZarrStorage, leaf_group_keys};
+use beacon_arrow_zarr::util::{NOMINAL_GROUP_SIZE, ZarrStorage, leaf_group_keys};
 use datafusion::catalog::{Session, TableProvider};
 use datafusion::datasource::TableType;
 use datafusion::datasource::listing::PartitionedFile;
@@ -198,7 +198,7 @@ impl TableProvider for IcechunkTable {
             .leaf_files(&storage)
             .await?
             .into_iter()
-            .map(|key| PartitionedFile::new(key, 0))
+            .map(|key| PartitionedFile::new(key, NOMINAL_GROUP_SIZE))
             .collect();
 
         // The scan carries nd data as `beacon.nd`-encoded struct columns; the nd
@@ -207,10 +207,12 @@ impl TableProvider for IcechunkTable {
             Arc::new(beacon_datafusion_ext::nd::encoded_schema(&self.schema)),
             vec![],
         );
-        let source = ZarrSource::new(table_schema)
-            .with_read_dimensions(self.read_dimensions.clone())
-            .with_skip_unbroadcastable(self.skip_unbroadcastable)
-            .with_storage(storage);
+        let source = zarr_source(
+            table_schema,
+            self.read_dimensions.clone(),
+            self.skip_unbroadcastable,
+            Some(storage),
+        );
 
         let conf = FileScanConfigBuilder::new(self.object_store_url.clone(), Arc::new(source))
             .with_file_groups(vec![FileGroup::new(files)])
@@ -220,7 +222,7 @@ impl TableProvider for IcechunkTable {
 
         // Filters are not consumed here: `supports_filters_pushdown` leaves the
         // `FilterExec` in place and DataFusion's physical filter pushdown sinks
-        // it into the `ZarrSource`, exactly as for a listed zarr store.
+        // it into the `NdSource`, exactly as for a listed zarr store.
         nd_scan_plan(conf)
     }
 }
