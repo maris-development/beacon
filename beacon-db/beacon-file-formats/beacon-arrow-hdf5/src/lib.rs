@@ -26,6 +26,7 @@ mod config;
 /// Layout conventions read on top of the HDF5 container.
 pub mod conventions;
 mod format;
+mod nd;
 mod open;
 pub mod reader;
 mod source;

@@ -30,6 +30,9 @@ oxcdf-hdf5 = { workspace = true }
 beacon-arrow-netcdf = { path = "../beacon-arrow-netcdf" }
 beacon-datafusion-ext = { path = "../../beacon-datafusion-ext" }
 beacon-nd-execution = { path = "../../beacon-nd-execution" }
+beacon-nd-dataset = { path = "../../beacon-nd/beacon-nd-dataset" }
+beacon-nd-scan = { path = "../../beacon-nd/beacon-nd-scan" }
+nd-arrow-array = { workspace = true }
 beacon-nd-array = { path = "../beacon-nd-array" }
 beacon-common = { path = "../../beacon-common" }
 
