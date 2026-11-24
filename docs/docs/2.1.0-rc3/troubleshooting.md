@@ -88,8 +88,8 @@ See [CF decoding](/docs/2.1.0-rc3/cf-decoding).
 
 ### Missing data shows as `-999`, not `NULL`
 
-The file uses `missing_value` rather than `_FillValue`. The NetCDF reader nulls both. The HDF5
-and Zarr readers null `_FillValue` only. With those readers, filter in SQL:
+The file uses `missing_value` rather than `_FillValue`. The NetCDF and Zarr readers null both. The
+HDF5 reader nulls `_FillValue` only. With that reader, filter in SQL:
 
 ```sql
 SELECT * FROM read_hdf5('old/*.h5') WHERE sst != -999.0;

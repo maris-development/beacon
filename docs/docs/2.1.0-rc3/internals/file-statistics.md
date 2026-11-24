@@ -278,13 +278,13 @@ observation variables. Only the HDF5 format reads a ragged file.
 :::
 
 :::info Zarr reads only its coordinates
-A Zarr array can state its range in its metadata, with the `actual_range` attribute. Beacon uses
-that attribute and reads no chunk. Beacon reads an array of rank 0 or rank 1 that does not state
-one. Beacon never reads a data grid of rank 2 or higher, and that array supplies no range.
+A Zarr array can state its range in its metadata, with the `actual_range` attribute. For an array
+with no `scale_factor` and no `add_offset`, Beacon uses that attribute and reads no chunk. Beacon
+reads each other array of rank 0 or rank 1. Beacon never reads a data grid of rank 2 or higher. A
+data grid without `actual_range`, or with `scale_factor` or `add_offset`, supplies no range.
 
-Beacon does not use `valid_min` and `valid_max`. Those attributes state which values are valid. A
-store can hold a value outside them, and Beacon returns that value. A range from those attributes
-would drop a file that holds a matching row.
+Beacon does not use `valid_min` and `valid_max` for the range. Those attributes state which values
+are valid, not which values the store holds. Beacon reads a value outside them as null.
 
 Set `BEACON_ZARR_ENABLE_STATISTICS=false` to stop this work.
 :::

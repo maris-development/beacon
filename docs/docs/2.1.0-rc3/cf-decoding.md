@@ -11,17 +11,18 @@ gap as a sentinel number. Beacon decodes these on read.
 **You get physical values, not raw stored integers.** This page says exactly which attributes Beacon
 acts on, and which it ignores.
 
-Beacon has two sets of rules:
+Beacon has three sets of rules:
 
 - The **NetCDF** reader (`read_netcdf`, `STORED AS NC`) decodes with the ND framework. The
   [CF decode](/docs/2.1.0-rc3/formats/netcdf#cf-decode) section of the NetCDF page has the full
   list.
-- The **HDF5** reader (`read_hdf5`, `STORED AS HDF5`) and the **Zarr** reader (`read_zarr`) apply
-  a smaller set of rules.
+- The **Zarr** reader (`read_zarr`) also decodes with the ND framework. The [Zarr](#zarr) section
+  gives the differences.
+- The **HDF5** reader (`read_hdf5`, `STORED AS HDF5`) applies a smaller set of rules.
 
 ## Summary
 
-| Attribute | NetCDF | HDF5 and Zarr |
+| Attribute | NetCDF | HDF5 |
 |---|---|---|
 | `units` with `since` | `Timestamp(Microsecond)` | `Timestamp(Nanosecond)` |
 | `calendar` | Gregorian or Julian. Other calendars give numbers | Gregorian or Julian. Other calendars give numbers |
@@ -41,7 +42,7 @@ uses the NetCDF rules. `STORED AS HDF5` uses the HDF5 rules.
 
 A variable whose `units` attribute has the form `<unit> since <date>` is a CF time. Beacon converts
 the count to an absolute instant and returns an Arrow timestamp. The NetCDF reader returns
-microseconds. The HDF5 and Zarr readers return nanoseconds.
+microseconds. The HDF5 reader returns nanoseconds.
 
 ```text
 double time(time) ;
@@ -75,7 +76,7 @@ the range of a microsecond timestamp also becomes `NULL`.
 | Reader | Units |
 |---|---|
 | NetCDF | `microseconds`, `milliseconds`, `seconds`, `minutes`, `hours`, `days`, `weeks`. The singular form, abbreviations such as `ms`, `s`, `min`, `h` and `d`, and capitals also decode, for example `hour`, `h` and `Days` |
-| HDF5, Zarr | `nanoseconds`, `microseconds`, `milliseconds`, `seconds`, `minutes`, `hours`, `days`, `weeks`. Only this plural, lowercase form decodes |
+| HDF5 | `nanoseconds`, `microseconds`, `milliseconds`, `seconds`, `minutes`, `hours`, `days`, `weeks`. Only this plural, lowercase form decodes |
 
 In the NetCDF reader, the unit `nanoseconds since <date>` gives numbers in the stored type, for
 example `Int64`. Beacon's NetCDF writer writes this unit for a `Timestamp(Nanosecond)` column. The
@@ -135,7 +136,7 @@ The type of the decoded column depends on the reader:
 
 - **NetCDF**: the float type of `scale_factor` or `add_offset`. A `Float32` attribute gives a
   `Float32` column. An integer attribute gives `Float64`.
-- **HDF5 and Zarr**: `Float64`, whatever the stored type was.
+- **HDF5**: `Float64`, whatever the stored type was.
 
 Either attribute works alone. Beacon multiplies a variable that has only `scale_factor`. It shifts a
 variable that has only `add_offset`.
@@ -145,7 +146,7 @@ variable that has only `add_offset`.
 A variable can have `scale_factor` or `add_offset`, with `units = "<unit> since <date>"`.
 
 - **NetCDF**: Beacon unpacks the values, then decodes the time. The column is a timestamp.
-- **HDF5 and Zarr**: Beacon unpacks the values only. The column is `Float64` numbers.
+- **HDF5**: Beacon unpacks the values only. The column is `Float64` numbers.
 
 ## Missing data: `_FillValue`
 
@@ -187,9 +188,9 @@ the record. A `_FillValue = -32768` on `days since 1970-01-01` is a null, not `1
 CF also allows an older `missing_value` attribute, with one or more values.
 
 - **NetCDF**: each value of `missing_value` becomes SQL `NULL`, as `_FillValue` does.
-- **HDF5 and Zarr**: Beacon does **not** treat it as a null. Those cells keep their stored number.
+- **HDF5**: Beacon does **not** treat it as a null. Those cells keep their stored number.
 
-With the HDF5 or Zarr reader, handle it in SQL:
+With the HDF5 reader, handle it in SQL:
 
 ```sql
 SELECT * FROM read_hdf5('old/*.h5') WHERE sst != -999.0;
@@ -201,7 +202,7 @@ The value is visible as the `sst.missing_value` column, so you can check what it
 
 - **NetCDF**: a value below `valid_min` or above `valid_max` becomes SQL `NULL`. `valid_range`
   gives both limits. Each attribute works alone.
-- **HDF5 and Zarr**: Beacon keeps the attributes as columns. It does not drop or null values
+- **HDF5**: Beacon keeps the attributes as columns. It does not drop or null values
   outside the range.
 
 ## Names and other attributes
@@ -216,6 +217,11 @@ SELECT DISTINCT "temperature.standard_name"
 FROM read_netcdf('argo/**/*.nc')
 LIMIT 0;
 ```
+
+## Zarr
+
+The Zarr reader follows the NetCDF rules, with two differences. A packed column is `Float64`. An
+integer variable with `nanoseconds since` units is `Timestamp(ns)`. See [CF decode](/docs/2.1.0-rc3/formats/zarr#cf-decode) on the Zarr page for the full list.
 
 ## Atlas
 
