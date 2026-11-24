@@ -141,7 +141,7 @@ impl ZarrVariable {
         T::Native: ElementOwned + Send + Sync,
     {
         let values: Vec<T::Native> = self.elements(subset).await?;
-        Ok(Arc::new(PrimitiveArray::<T>::from_iter_values(values)))
+        Ok(Arc::new(PrimitiveArray::<T>::new(values.into(), None)))
     }
 
     async fn elements<T: ElementOwned + Send + Sync>(
@@ -462,6 +462,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_uint64_max_fill_is_null() {
+        let variable = variable(
+            &[2],
+            &[2],
+            json!({"_FillValue": 18446744073709551615u64}),
+            vec![1u64, u64::MAX],
+        )
+        .await;
+        let expected: ArrayRef = Arc::new(UInt64Array::from(vec![Some(1), None]));
+        assert_full(&variable, expected).await;
+    }
+
+    #[tokio::test]
+    async fn a_fill_of_another_type_is_ignored_on_a_bool_variable() {
+        let flag = variable(&[2], &[2], json!({"_FillValue": 0}), vec![true, false]).await;
+        let expected: ArrayRef = Arc::new(BooleanArray::from(vec![Some(true), Some(false)]));
+        assert_full(&flag, expected).await;
+    }
+
+    #[tokio::test]
     async fn a_time_variable_is_timestamp_micros() {
         let variable = variable(
             &[2],
@@ -486,6 +506,20 @@ mod tests {
         let variable = packed().await;
         assert!(variable.attributes().contains("scale_factor"));
         assert!(variable.attributes().contains("add_offset"));
+    }
+
+    /// The decode reads the exact fill; the attributes keep the JSON number.
+    #[tokio::test]
+    async fn the_attributes_keep_an_int64_fill_as_float64() {
+        let variable = variable(
+            &[1],
+            &[1],
+            json!({"_FillValue": 9223372036854775807i64}),
+            vec![1i64],
+        )
+        .await;
+        let fill = variable.attributes().get("_FillValue").unwrap();
+        assert_eq!(fill.data_type(), &DataType::Float64);
     }
 
     #[tokio::test]

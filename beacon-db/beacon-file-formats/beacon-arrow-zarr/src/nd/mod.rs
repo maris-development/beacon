@@ -13,7 +13,7 @@ use zarrs_storage::AsyncReadableListableStorageTraits;
 use attributes::attributes_of;
 use variable::ZarrVariable;
 
-pub(crate) mod attributes;
+mod attributes;
 pub(crate) mod decode;
 #[cfg(test)]
 pub(crate) mod testing;
@@ -136,7 +136,8 @@ struct UsedDimensions {
 }
 
 impl UsedDimensions {
-    /// No dimension yet. `arrays` gives the real names: each array of the group, also an unsupported one.
+    /// No dimension yet. `arrays` gives the real names: each array of the group,
+    /// also an unsupported one.
     fn new<'a>(arrays: impl IntoIterator<Item = &'a ZarrArray>) -> Self {
         let real = arrays
             .into_iter()
@@ -339,6 +340,15 @@ mod tests {
         assert_eq!(axes(&dataset, "a"), ["a_dim_0"]);
         assert_eq!(axes(&dataset, "b"), ["dim_0"]);
         assert_eq!(names(dataset.invented_dimensions().to_vec()), ["a_dim_0"]);
+    }
+
+    #[tokio::test]
+    async fn a_reader_name_skips_a_taken_array_name() {
+        let store = group().await;
+        array(&store, "a", &[3], &[None]).await;
+        array(&store, "r", &[4, 5], &[Some("dim_0"), Some("a_dim_0")]).await;
+        let dataset = open(&store).await.unwrap();
+        assert_eq!(axes(&dataset, "a"), ["a_dim_0_2"]);
     }
 
     #[tokio::test]

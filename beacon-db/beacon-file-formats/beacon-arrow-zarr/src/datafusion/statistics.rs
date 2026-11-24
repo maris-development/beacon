@@ -350,8 +350,8 @@ mod tests {
     use nd_arrow_array::{Dimensions, NdArrowArray};
     use serde_json::json;
 
-    use crate::nd::attributes::attributes_of;
     use crate::nd::decode::Decode;
+    use crate::nd::testing::attributes_of;
 
     /// The attributes that a Zarr array with these JSON attributes gets.
     fn attrs(pairs: &[(&str, serde_json::Value)]) -> Attributes {
@@ -496,6 +496,27 @@ mod tests {
         assert!(attribute_range(&a, &timestamp_type()).is_none());
     }
 
+    #[test]
+    fn a_time_range_out_of_range_at_the_low_end_is_unknown() {
+        let a = attrs(&[
+            ("actual_range", json!([-1e300, 0])),
+            ("units", json!("days since 1970-01-01")),
+        ]);
+        assert!(attribute_range(&a, &timestamp_type()).is_none());
+    }
+
+    /// A packed time variable states its range in packed units.
+    #[test]
+    fn a_packed_time_variable_gives_no_shortcut() {
+        let a = attrs(&[
+            ("actual_range", json!([0, 1])),
+            ("units", json!("days since 1970-01-01")),
+            ("scale_factor", json!(0.5)),
+        ]);
+        let micros = DataType::Timestamp(TimeUnit::Microsecond, None);
+        assert!(attribute_range(&a, &micros).is_none());
+    }
+
     /// The pruning contract: `valid_min`/`valid_max` bound the *valid* values,
     /// not the stored ones, so they may never become a range.
     #[test]
@@ -574,6 +595,24 @@ mod tests {
         ranges.add("lat", Some(f64_range(10.0, 20.0)));
         ranges.add("lat", None);
         ranges.add("lat", Some(f64_range(0.0, 1.0)));
+        let stats = ranges.column_statistics("lat");
+        assert_eq!(stats.min_value, Precision::Absent);
+        assert_eq!(stats.max_value, Precision::Absent);
+    }
+
+    /// A statistics error gives `None` for the leaf group, in either order.
+    #[test]
+    fn a_statistics_error_makes_the_column_unknown() {
+        let mut ranges = StoreRanges::default();
+        ranges.add("lat", Some(f64_range(10.0, 20.0)));
+        ranges.add("lat", None);
+        let stats = ranges.column_statistics("lat");
+        assert_eq!(stats.min_value, Precision::Absent);
+        assert_eq!(stats.max_value, Precision::Absent);
+
+        let mut ranges = StoreRanges::default();
+        ranges.add("lat", None);
+        ranges.add("lat", Some(f64_range(10.0, 20.0)));
         let stats = ranges.column_statistics("lat");
         assert_eq!(stats.min_value, Precision::Absent);
         assert_eq!(stats.max_value, Precision::Absent);

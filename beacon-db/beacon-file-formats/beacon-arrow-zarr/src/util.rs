@@ -11,7 +11,8 @@ use zarrs::group::Group;
 use zarrs_object_store::AsyncObjectStore;
 use zarrs_storage::AsyncReadableListableStorageTraits;
 
-/// The size of a leaf group entry. A group has no byte size, and DataFusion splits only a nonzero size.
+/// The size of a leaf group entry. A group has no byte size, and DataFusion
+/// splits only a nonzero size.
 pub const NOMINAL_GROUP_SIZE: u64 = 1 << 20;
 
 /// The storage a zarr group is opened over.

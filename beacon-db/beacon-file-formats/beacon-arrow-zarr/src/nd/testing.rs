@@ -13,6 +13,8 @@ use zarrs_object_store::AsyncObjectStore;
 use super::ZarrArray;
 use crate::util::ZarrStorage;
 
+pub(crate) use super::attributes::attributes_of;
+
 /// A writable in-memory Zarr store for tests.
 pub(crate) struct TestStore {
     zarr: Arc<AsyncObjectStore<Arc<InMemory>>>,

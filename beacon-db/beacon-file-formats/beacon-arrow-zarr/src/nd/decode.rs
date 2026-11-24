@@ -30,12 +30,12 @@ pub(crate) enum Decode {
         epoch: hifitime::Epoch,
         unit: hifitime::Unit,
     },
-    /// Spec 6.9. The reference instant in nanoseconds since 1970-01-01.
+    /// An integer nanosecond time variable. The reference instant in nanoseconds since 1970-01-01.
     NanoTime { reference_nanos: i64 },
 }
 
 impl Decode {
-    /// Spec 8.4: the choice from the stored type and the attributes. No I/O.
+    /// The decode for the stored type and the attributes. No I/O.
     pub(crate) fn choose(stored: &DataType, attributes: &Attributes) -> Decode {
         // The read handles the fill of a string variable.
         if !(stored.is_integer() || stored.is_floating()) {
@@ -310,7 +310,7 @@ mod tests {
 
     use arrow::array::{
         Array, ArrayRef, AsArray, Float32Array, Float64Array, Int16Array, Int32Array, Int64Array,
-        StringArray,
+        StringArray, UInt64Array,
     };
     use arrow::datatypes::{
         Float32Type, Float64Type, Int16Type, Int32Type, Int64Type, TimestampMicrosecondType,
@@ -846,6 +846,32 @@ mod tests {
                 "{lower} {stored} {upper}"
             );
         }
+    }
+
+    #[test]
+    fn a_negative_large_nanosecond_bound_contains_the_stored_value() {
+        let attributes = Attributes::new().with("units", "nanoseconds since 1970-01-01");
+        let two_53 = 9_007_199_254_740_992_i64;
+        // 2^53 + 1 has the f64 2^53.
+        for stored in [-1_700_000_000_000_000_100_i64, two_53, two_53 + 1] {
+            let value = stored as f64;
+            let lower = nano_bound(&attributes, value, BoundSide::Lower).unwrap();
+            let upper = nano_bound(&attributes, value, BoundSide::Upper).unwrap();
+            assert!(
+                lower <= stored && stored <= upper,
+                "{lower} {stored} {upper}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_uint64_nanosecond_value_above_i64_max_is_null() {
+        let raw = array(
+            Arc::new(UInt64Array::from(vec![5u64, u64::MAX])),
+            Attributes::new().with("units", "nanoseconds since 1970-01-01"),
+        );
+        let (_, out) = decode(&raw);
+        assert_eq!(nano_stamps(&out), vec![Some(5), None]);
     }
 
     #[test]

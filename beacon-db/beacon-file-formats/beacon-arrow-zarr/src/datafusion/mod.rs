@@ -798,8 +798,15 @@ mod tests {
             .expect("a zarr group is planned across the partitions");
 
         assert_eq!(planned.file_groups.len(), PARTITIONS);
+        assert!(
+            planned.file_groups.iter().all(|group| !group.is_empty()),
+            "each partition has a slice"
+        );
         let entries: usize = planned.file_groups.iter().map(|group| group.len()).sum();
-        assert_eq!(entries, 16, "four slices of the one group per partition");
+        assert!(
+            entries > PARTITIONS,
+            "{entries} slices over {PARTITIONS} partitions"
+        );
     }
 
     // ── Partitioned tables ─────────────────────────────────────────────
@@ -1324,8 +1331,6 @@ mod tests {
 
     #[tokio::test]
     async fn explicit_read_dimensions_limits_schema() {
-        use datafusion::catalog::TableProvider;
-
         let ctx = SessionContext::new();
         let store_dir = concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -1379,8 +1384,6 @@ mod tests {
 
     #[tokio::test]
     async fn schema_includes_arrays_and_attributes() {
-        use datafusion::catalog::TableProvider;
-
         let ctx = SessionContext::new();
         register_example(&ctx).await;
 

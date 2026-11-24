@@ -183,6 +183,23 @@ mod tests {
     }
 
     #[test]
+    fn an_integer_valid_range_is_exact_only_when_each_item_fits() {
+        let list_of = |item: DataType| DataType::List(Field::new("item", item, true).into());
+
+        let fits = decode_attributes(&json(r#"{"valid_range":[0,10]}"#), &DataType::Int16);
+        assert_eq!(
+            fits.get("valid_range").unwrap().data_type(),
+            &list_of(DataType::Int16)
+        );
+
+        let too_large = decode_attributes(&json(r#"{"valid_range":[0,40000]}"#), &DataType::Int16);
+        assert_eq!(
+            too_large.get("valid_range").unwrap().data_type(),
+            &list_of(DataType::Float64)
+        );
+    }
+
+    #[test]
     fn a_float_variable_keeps_float64_cf_keys() {
         let attrs = decode_attributes(&json(r#"{"_FillValue": 7}"#), &DataType::Float32);
 
