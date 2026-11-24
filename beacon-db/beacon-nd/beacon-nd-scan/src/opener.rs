@@ -31,15 +31,21 @@ pub struct NdScanOptions {
     pub skip_unbroadcastable: bool,
     /// Skip a file that the format cannot open.
     pub skip_invalid_files: bool,
+    /// The minimum size of one slice of a file, in bytes.
+    ///
+    /// `None` uses `datafusion.optimizer.repartition_file_min_size` of the session.
+    /// `Some(0)` sets no minimum.
+    pub min_slice_size: Option<u64>,
 }
 
 impl Default for NdScanOptions {
-    /// The grid of each file, and no skips.
+    /// The grid of each file, no skips, and the minimum slice size of the session.
     fn default() -> Self {
         Self {
             grid: GridSelection::PerFile,
             skip_unbroadcastable: false,
             skip_invalid_files: false,
+            min_slice_size: None,
         }
     }
 }

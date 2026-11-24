@@ -146,7 +146,8 @@ impl FileSource for NdSource {
 
     /// Slice each file in proportion to its size, and spread the entries over
     /// `target_partitions` groups. A file is never cut by byte range.
-    /// `repartition_file_min_size` is the minimum size of one slice.
+    /// The minimum size of one slice is the `min_slice_size` option, or
+    /// `repartition_file_min_size` when the option is not set.
     fn repartitioned(
         &self,
         target_partitions: usize,
@@ -167,7 +168,11 @@ impl FileSource for NdSource {
         let entries = if config.limit.is_some() {
             entries
         } else {
-            slice_files(entries, target_partitions, repartition_file_min_size as u64)
+            let minimum = self
+                .options
+                .min_slice_size
+                .unwrap_or(repartition_file_min_size as u64);
+            slice_files(entries, target_partitions, minimum)
         };
         let mut config = config.clone();
         config.file_groups = spread_files(entries, target_partitions);
@@ -269,12 +274,51 @@ mod tests {
 
     /// A source of the test opener on a table with the Float64 column `name`.
     fn source(name: &str) -> NdSource {
+        source_with(name, NdScanOptions::default())
+    }
+
+    /// The same source with the scan options `options`.
+    fn source_with(name: &str, options: NdScanOptions) -> NdSource {
         let schema = Arc::new(Schema::new(vec![Field::new(name, DataType::Float64, true)]));
         NdSource::new(
             Arc::new(MemoryOpener::default()),
-            NdScanOptions::default(),
+            options,
             TableSchema::from_file_schema(schema),
         )
+    }
+
+    /// How many entries `source` plans for one file of 1000 bytes on four partitions.
+    fn entries_of_one_file(source: &NdSource, session_minimum: usize) -> usize {
+        source
+            .repartitioned(4, session_minimum, None, &config_of(source, 1).build())
+            .unwrap()
+            .expect("the scan repartitions")
+            .file_groups
+            .iter()
+            .map(|group| group.files().len())
+            .sum()
+    }
+
+    #[test]
+    fn the_slice_size_option_overrides_the_session_minimum() {
+        let with = |min_slice_size| {
+            source_with(
+                "V0",
+                NdScanOptions {
+                    min_slice_size,
+                    ..NdScanOptions::default()
+                },
+            )
+        };
+
+        // The session minimum of 400 bytes allows two slices of 1000 bytes.
+        assert_eq!(entries_of_one_file(&with(None), 400), 2);
+        // The option allows five slices, and the session minimum does not apply.
+        assert_eq!(entries_of_one_file(&with(Some(200)), 400), 5);
+        // No minimum: the aim of sixteen entries decides.
+        assert_eq!(entries_of_one_file(&with(Some(0)), 400), 16);
+        // A large option keeps the file whole with no session minimum.
+        assert_eq!(entries_of_one_file(&with(Some(5000)), 0), 1);
     }
 
     /// A scan of `source` with one group for each of `files` files of 1000 bytes.

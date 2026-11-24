@@ -516,6 +516,8 @@ pub struct NdScanOptions {
     pub grid: GridSelection,
     pub skip_unbroadcastable: bool,
     pub skip_invalid_files: bool,
+    /// The minimum size of one slice, in bytes. `None` uses the session setting.
+    pub min_slice_size: Option<u64>,
 }
 
 /// Open one file and apply the grid. `Ok(None)` when an option skips the file.
@@ -593,8 +595,11 @@ next entry. This balance needs more entries than partitions.
   is the size of all unsliced files.
 - The count is at least 1 and at most `A`. A count of 1 leaves the file whole.
 - When `total` is 0, each file gets `ceil(A / files)` slices.
-- A slice is not smaller than `datafusion.optimizer.repartition_file_min_size`
-  bytes, 10 MiB by default. So a file gets at most `size / minimum` slices.
+- A slice is not smaller than the minimum slice size. So a file gets at most
+  `size / minimum` slices. The minimum is `NdScanOptions::min_slice_size`.
+  When that option is `None`, the minimum is
+  `datafusion.optimizer.repartition_file_min_size`, 10 MiB by default.
+  `Some(0)` sets no minimum. A format maps its table option to this field.
   The minimum does not apply to a file of size 0, because that size is not
   known.
 
