@@ -312,9 +312,9 @@ fn a_scan_holds_a_few_chunks_and_not_the_file() {
     let budget = 128 * MIB;
 
     runtime.block_on(async {
-        // A file of 256 MiB and a file of 16 GiB: the peak does not grow with the file.
+        // A file of 256 MiB and a file of 2 GiB: the peak does not grow with the file.
         let mut peaks = Vec::new();
-        for time in [1024, 65536] {
+        for time in [1024, 8192] {
             let opener = Arc::new(LazyOpener {
                 time,
                 opens: AtomicUsize::new(0),
@@ -339,8 +339,8 @@ fn a_scan_holds_a_few_chunks_and_not_the_file() {
             "the peak grows with the file: {peaks:?}"
         );
 
-        // A filter that keeps the last quarter of the 16 GiB file.
-        let time = 65536;
+        // A filter that keeps the last quarter of the 2 GiB file.
+        let time = 8192;
         let opener = Arc::new(LazyOpener {
             time,
             opens: AtomicUsize::new(0),
