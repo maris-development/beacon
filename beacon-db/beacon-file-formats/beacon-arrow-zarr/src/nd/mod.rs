@@ -18,7 +18,7 @@ mod attributes;
 #[allow(dead_code)]
 mod decode;
 #[cfg(test)]
-mod testing;
+pub(crate) mod testing;
 mod variable;
 
 /// A Zarr array over an async store that can read and list.

@@ -33,8 +33,6 @@ impl TestStore {
     }
 
     /// The object store under the Zarr store, for a DataFusion session or an opener.
-    // The opener tests of a later change use this method.
-    #[allow(dead_code)]
     pub(crate) fn object_store(&self) -> Arc<dyn ObjectStore> {
         self.memory.clone()
     }

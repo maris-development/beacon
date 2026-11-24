@@ -90,13 +90,10 @@ mod tests {
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use object_store::{ObjectMeta, ObjectStore};
-    use serde_json::{Map, json};
-    use zarrs::array::{ArrayBuilder, data_type};
-    use zarrs::group::GroupBuilder;
-    use zarrs_object_store::AsyncObjectStore;
+    use serde_json::json;
 
     use super::{ZarrOpener, scan_options, zarr_source};
-    use crate::util::ZarrStorage;
+    use crate::nd::testing::{TestStore, write_array, write_group};
 
     fn meta(path: &str) -> ObjectMeta {
         ObjectMeta {
@@ -108,34 +105,28 @@ mod tests {
         }
     }
 
-    /// A store with the group "/s.zarr" and the metadata of its array "a", which has a `long_name`.
-    async fn group() -> Arc<dyn ObjectStore> {
-        let memory = Arc::new(InMemory::new());
-        let zarr = Arc::new(AsyncObjectStore::new(memory.clone()));
-        GroupBuilder::new()
-            .build(zarr.clone(), "/s.zarr")
-            .unwrap()
-            .async_store_metadata()
-            .await
-            .unwrap();
-        let mut attributes = Map::new();
-        attributes.insert("long_name".to_string(), json!("the a"));
-        ArrayBuilder::new(vec![2], vec![2], data_type::float64(), 0.0f64)
-            .dimension_names(Some([Some("x")]))
-            .attributes(attributes)
-            .build(zarr, "/s.zarr/a")
-            .unwrap()
-            .async_store_metadata()
-            .await
-            .unwrap();
-        memory
+    /// A store with the group "/s.zarr" and its array "a", which has a `long_name`.
+    async fn group() -> TestStore {
+        let store = TestStore::new();
+        write_group(&store, "/s.zarr", json!({})).await;
+        write_array(
+            &store,
+            "/s.zarr/a",
+            &[2],
+            &[2],
+            &[Some("x")],
+            json!({"long_name": "the a"}),
+            vec![1.0f64, 2.0],
+        )
+        .await;
+        store
     }
 
     #[tokio::test]
     async fn the_opener_reads_a_group_from_the_session_store() {
         let store = group().await;
         let dataset = ZarrOpener::new(None)
-            .open(store, &meta("s.zarr/zarr.json"))
+            .open(store.object_store(), &meta("s.zarr/zarr.json"))
             .await
             .unwrap();
         let names = dataset.variable_names();
@@ -148,9 +139,9 @@ mod tests {
 
     #[tokio::test]
     async fn the_storage_override_wins_over_the_session_store() {
-        let storage = ZarrStorage::from_object_store(group().await);
+        let store = group().await;
         let session: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let dataset = ZarrOpener::new(Some(storage))
+        let dataset = ZarrOpener::new(Some(store.storage()))
             .open(session, &meta("s.zarr/zarr.json"))
             .await;
         assert!(dataset.is_ok(), "{dataset:?}");
@@ -160,7 +151,7 @@ mod tests {
     async fn an_object_that_is_not_zarr_json_is_an_error() {
         let store = group().await;
         let result = ZarrOpener::new(None)
-            .open(store, &meta("s.zarr/a/c/0"))
+            .open(store.object_store(), &meta("s.zarr/a/c/0"))
             .await;
         assert!(matches!(result, Err(Error::Format(_))), "{result:?}");
     }
