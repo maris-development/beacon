@@ -47,11 +47,10 @@ released from a single `v*` tag. Releases before 2.0.0 are recorded in the
 
 ### Changed
 
-- **NetCDF scans run on DataFusion morsels.** The NetCDF format has its own scan. One large file
-  still reads on several partitions, and a filter on a coordinate still skips chunks. A file whose
-  selected grid fits in one batch is read as a whole.
-- **NetCDF reads through the ND framework.** Beacon decodes the CF conventions of a NetCDF variable
-  with the ND framework. Some column types and values change:
+- **NetCDF reads through the ND framework.** The NetCDF scan runs on the ND framework. The framework
+  gives the slices and the chunk prune. One large file reads on several partitions, and a filter on
+  a coordinate skips chunks. Beacon decodes the CF conventions of a NetCDF variable with the ND
+  framework. Some column types and values change:
   - A CF time variable is `Timestamp(Microsecond)`, not `Timestamp(Nanosecond)`.
   - Packed values (`scale_factor`, `add_offset`) get the float type of those attributes, for
     example `Float32`. Else they are `Float64`.
@@ -64,11 +63,16 @@ released from a single `v*` tag. Releases before 2.0.0 are recorded in the
   - A time unit in singular form, as an abbreviation or with capitals (`hour`, `h`, `Days`)
     decodes. A time of day or a zone in the reference date applies. Before, Beacon ignored it.
   - Calendar `julian` decodes. Calendars such as `noleap` and `360_day` stay numbers.
-  - The unit `nanoseconds since ...` stays numbers (`Int64`). Beacon's NetCDF writer writes this
-    unit for a `Timestamp(Nanosecond)` column, so such a file reads back as numbers.
+  - The unit `nanoseconds since ...` stays numbers in the stored type, for example `Int64`.
+    Beacon's NetCDF writer writes this unit for a `Timestamp(Nanosecond)` column, so such a file
+    reads back as numbers.
   - A variable shorter than its unlimited dimension gives nulls past its length.
   - Beacon leaves out a variable that it cannot model, with its attribute columns. An example is
     `m(x, x)` with a repeated dimension. Beacon then also leaves out `m.units`.
+  - With `read_dimensions` and `skip_unbroadcastable`, Beacon skips a ragged NetCDF file with a
+    warning. It does not refuse the file.
+  - A NetCDF-4 file that you read with `STORED AS HDF5` keeps the HDF5 decode: nanosecond time,
+    `Float64` packing, and no `missing_value`. `STORED AS NC` uses the NetCDF rules.
 
   A stored table keeps its stored column types. Refresh each NetCDF table with a packed time
   column: use `REFRESH`, or drop the table and create it again. Else a stored `Float64` column gets

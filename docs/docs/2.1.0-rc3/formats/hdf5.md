@@ -12,10 +12,13 @@ Beacon recognizes `.h5` and `.hdf5`. It finds them in the dataset store automati
 
 ## The reader
 
-A netCDF-4 file **is** an HDF5 file. HDF5 behaves exactly like
-[NetCDF](/docs/2.1.0-rc3/formats/netcdf): the same data model, the same
-[array to table mapping](/docs/2.1.0-rc3/arrays-to-tables), the same
-[CF decoding](/docs/2.1.0-rc3/cf-decoding) and the same attribute columns.
+A netCDF-4 file **is** an HDF5 file. HDF5 has the data model of
+[NetCDF](/docs/2.1.0-rc3/formats/netcdf), the same
+[array to table mapping](/docs/2.1.0-rc3/arrays-to-tables) and the same attribute columns. The
+[CF decoding](/docs/2.1.0-rc3/cf-decoding) rules are different.
+
+A NetCDF-4 file that you read with `STORED AS HDF5` keeps the HDF5 decode: nanosecond time,
+`Float64` packing, and no `missing_value`. `STORED AS NC` uses the NetCDF rules.
 
 Beacon reads HDF5 with a pure-Rust reader:
 

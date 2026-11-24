@@ -102,13 +102,13 @@ result for each case.
 | `_FillValue` | The values become null. A `_FillValue` of another type gets the type of the variable first. |
 | `missing_value`, with one or more values | The values become null. |
 | `valid_min`, `valid_max`, `valid_range` | The values outside the range become null. |
-| Packed time (`scale_factor` and `units = "<unit> since <date>"`) | A timestamp |
+| Packed time (`scale_factor` or `add_offset`, with `units = "<unit> since <date>"`) | A timestamp |
 | NaN or infinite time value | Null |
 | Time unit in singular form, as an abbreviation or with capitals (`hour`, `h`, `Days`) | A timestamp |
 | A time of day or a zone in the reference date (`hours since 2000-01-01 12:00`) | Beacon applies it. |
 | Calendar `standard`, `gregorian`, `proleptic_gregorian` or `julian` | A timestamp |
 | Calendar `noleap`, `360_day` or a different calendar | Numbers |
-| Time unit `nanoseconds` (`nanoseconds since <date>`) | Numbers (`Int64`) |
+| Time unit `nanoseconds` (`nanoseconds since <date>`) | Numbers in the stored type, for example `Int64` |
 | A variable shorter than its unlimited dimension | The cells past the length of the variable are null. |
 
 Beacon's NetCDF writer writes the unit `nanoseconds since 1970-01-01` for a column of type
@@ -117,7 +117,8 @@ Beacon's NetCDF writer writes the unit `nanoseconds since 1970-01-01` for a colu
 ### Refresh a NetCDF table
 
 An external table keeps the column types that Beacon stored when you created the table. Beacon casts
-the new types to the stored types. A cast from microseconds to nanoseconds is exact.
+the new types to the stored types. A cast from microseconds to nanoseconds is exact for a time in
+the years 1677 to 2262. Beacon gives null for a time outside these years.
 
 A packed time column is different. A stored `Float64` column gets the microseconds since 1970, not
 the original values. Beacon gives no error. Refresh each NetCDF table with a packed time column.
