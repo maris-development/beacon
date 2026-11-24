@@ -84,7 +84,6 @@ impl IcechunkTable {
             ROOT_GROUP,
             read_dimensions.clone(),
             skip_unbroadcastable,
-            Some("read_icechunk"),
             &beacon_datafusion_ext::type_widening::session_widening(session),
         )
         .await

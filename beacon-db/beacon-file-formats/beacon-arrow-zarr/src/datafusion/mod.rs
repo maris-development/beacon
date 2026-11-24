@@ -395,7 +395,6 @@ impl FileFormat for ZarrFormat {
                 &zarr_path.as_zarr_path(),
                 self.read_dimensions.clone(),
                 self.skip_unbroadcastable,
-                Some("read_zarr"),
                 &widening,
             )
             .await

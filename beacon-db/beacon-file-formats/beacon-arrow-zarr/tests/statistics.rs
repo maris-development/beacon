@@ -279,7 +279,6 @@ async fn statistics_over(store: Arc<dyn ObjectStore>) -> (SchemaRef, Statistics)
         "/",
         None,
         false,
-        None,
         &beacon_datafusion_ext::type_widening::ArrowTypeWidening::default_extension(),
     )
     .await
@@ -364,8 +363,8 @@ async fn actual_range_needs_no_chunk_read() {
     );
 
     let (min, max) = f64_bounds(column(&schema, &stats, "sst_bounded"));
-    assert!(min <= 0.0 && min >= 0.0f64.next_down(), "min {min}");
-    assert!(max >= 19.0 && max <= 19.0f64.next_up(), "max {max}");
+    assert!(min < 0.0 && min >= 0.0f64.next_down(), "min {min}");
+    assert!(max > 19.0 && max <= 19.0f64.next_up(), "max {max}");
 }
 
 /// The whole subsystem, through the file format the session registers: the

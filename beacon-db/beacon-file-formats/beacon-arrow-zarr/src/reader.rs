@@ -28,7 +28,7 @@ use crate::{datafusion::opener::open_leaf, util::recursive_groups};
 /// table and the files of every other format use.
 ///
 /// Each leaf opens as the ND scan opens it, so the schema matches what the scan
-/// reads. `_log_label` is not used: the ND open logs each skipped leaf.
+/// reads. The ND open logs each skipped leaf.
 ///
 /// [`session_widening`]: beacon_datafusion_ext::type_widening::session_widening
 pub async fn schema_from_group_path(
@@ -36,7 +36,6 @@ pub async fn schema_from_group_path(
     group_path: &str,
     read_dimensions: Option<Vec<String>>,
     skip_unbroadcastable: bool,
-    _log_label: Option<&str>,
     widening: &ArrowTypeWidening,
 ) -> anyhow::Result<SchemaRef> {
     let group = Group::async_open(storage.clone(), group_path)

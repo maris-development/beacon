@@ -400,9 +400,9 @@ mod tests {
     fn actual_range_bounds_a_float_array() {
         let a = attrs(&[("actual_range", json!([-1.5, 3.5]))]);
         let (min, max) = f64_bounds(&a);
-        // The bound contains the stated values and is at most one step wider.
-        assert!(min <= -1.5 && min >= (-1.5f64).next_down(), "min {min}");
-        assert!(max >= 3.5 && max <= 3.5f64.next_up(), "max {max}");
+        // The bound is one step wider than the stated values.
+        assert!(min < -1.5 && min >= (-1.5f64).next_down(), "min {min}");
+        assert!(max > 3.5 && max <= 3.5f64.next_up(), "max {max}");
     }
 
     #[test]
@@ -601,8 +601,8 @@ mod tests {
     fn reversed_actual_range_is_read_low_first() {
         let a = attrs(&[("actual_range", json!([9.0, 1.0]))]);
         let (min, max) = f64_bounds(&a);
-        assert!(min <= 1.0 && min >= 1.0f64.next_down(), "min {min}");
-        assert!(max >= 9.0 && max <= 9.0f64.next_up(), "max {max}");
+        assert!(min < 1.0 && min >= 1.0f64.next_down(), "min {min}");
+        assert!(max > 9.0 && max <= 9.0f64.next_up(), "max {max}");
     }
 
     // ── folding leaf groups ──────────────────────────────────────────────

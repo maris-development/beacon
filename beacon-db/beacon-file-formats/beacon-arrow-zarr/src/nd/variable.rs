@@ -151,7 +151,12 @@ impl ZarrVariable {
         self.array
             .async_retrieve_array_subset::<Vec<T>>(subset)
             .await
-            .map_err(Error::format)
+            .map_err(|error| {
+                Error::format(format!(
+                    "failed to read the Zarr array {}: {error}",
+                    self.array.path()
+                ))
+            })
     }
 }
 

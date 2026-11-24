@@ -1,7 +1,8 @@
 //! The CF decode of a Zarr variable: fill, valid range, packing and time.
 //!
 //! Keep this file the same as `beacon-arrow-netcdf/src/nd/decode.rs` until a shared
-//! module replaces the two. `NanoTime` is the only difference.
+//! module replaces the two. The differences are `NanoTime`, `BoundSide`, `time_bound`
+//! and their helpers.
 
 use std::sync::Arc;
 
@@ -805,9 +806,18 @@ mod tests {
 
     #[test]
     fn the_time_bound_matches_the_decode() {
+        let days = |value: f64| {
+            array(
+                Arc::new(Float64Array::from(vec![value])),
+                Attributes::new().with("units", "days since 1970-01-01"),
+            )
+        };
         for (raw, value) in [
             (time(), 1.0),
+            (days(0.3), 0.3),
+            (days(1.0 / 24.0), 1.0 / 24.0),
             (julian_time(), 0.0),
+            (julian_days("days since 2000-01-01", 0.5), 0.5),
             (nanosecond_time(), 5.0),
         ] {
             let (decode, out) = decode(&raw);
