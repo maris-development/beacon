@@ -8714,8 +8714,8 @@ dependencies = [
 
 [[package]]
 name = "oxcdf"
-version = "0.6.0"
-source = "git+https://github.com/robinskil/oxcdf.git?tag=v0.6.0#b3b943595ed191b286d9cf1f8b0d4ac4aca6d429"
+version = "0.6.1"
+source = "git+https://github.com/robinskil/oxcdf.git?tag=v0.6.1#8ac5d53ad3982613a456486c08e3dbb75a37c3a0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -8728,8 +8728,8 @@ dependencies = [
 
 [[package]]
 name = "oxcdf-hdf5"
-version = "0.6.0"
-source = "git+https://github.com/robinskil/oxcdf.git?tag=v0.6.0#b3b943595ed191b286d9cf1f8b0d4ac4aca6d429"
+version = "0.6.1"
+source = "git+https://github.com/robinskil/oxcdf.git?tag=v0.6.1#8ac5d53ad3982613a456486c08e3dbb75a37c3a0"
 dependencies = [
  "async-trait",
  "bytes",

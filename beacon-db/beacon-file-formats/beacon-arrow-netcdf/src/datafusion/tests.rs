@@ -254,14 +254,6 @@ const LARGE_ROWS: usize = 100_000;
 
 /// Write a netCDF-4 file of 20 columns and 100k rows, and return its path.
 ///
-/// It is written **wide** rather than long, and that is not a free choice.
-/// `oxcdf` cannot read this writer's output once a single variable grows
-/// past roughly 200k values: it fails with "chunk at […] was neither cached
-/// nor fetched" while netcdf-c reads the same bytes. The limit follows one
-/// variable's chunk count, not the file's size, so 20 columns of 100k values
-/// gives a file of several chunks that still reads back. Measured:
-/// 20x100k is 16.3 MB and reads; 12x200k is 19.4 MB and does not.
-///
 /// The caller holds the [`TempDir`](tempfile::TempDir) for as long as the
 /// table is registered.
 fn write_large_netcdf() -> (tempfile::TempDir, PathBuf) {
@@ -278,6 +270,58 @@ fn write_large_netcdf() -> (tempfile::TempDir, PathBuf) {
     let path = dir.path().join("large.nc");
     write_netcdf(&path, columns);
     (dir, path)
+}
+
+/// A file with more chunks than the oxcdf chunk cache holds (512) reads every row.
+#[tokio::test]
+async fn a_file_with_more_chunks_than_the_cache_holds_reads_every_row() {
+    use crate::datafusion::options::NetcdfWriterOptions;
+    use crate::encoders::default::DefaultEncoder;
+    use crate::writer::ArrowRecordBatchWriter;
+    use arrow::array::{ArrayRef, Float64Array};
+    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::record_batch::RecordBatch;
+
+    // 5 columns of 400 chunks each: 2,000 chunks in one file.
+    let (columns, rows, chunk_rows) = (5, 40_000, 100);
+    let schema = Arc::new(Schema::new(
+        (0..columns)
+            .map(|column| Field::new(format!("V{column}"), DataType::Float64, false))
+            .collect::<Vec<_>>(),
+    ));
+    let arrays: Vec<ArrayRef> = (0..columns)
+        .map(|_| {
+            Arc::new(Float64Array::from_iter_values(
+                (0..rows).map(|row| row as f64),
+            )) as ArrayRef
+        })
+        .collect();
+    let dir = tempfile::tempdir().expect("a temp directory");
+    let path = dir.path().join("many_chunks.nc");
+    let options = NetcdfWriterOptions {
+        chunk_rows: std::num::NonZeroUsize::new(chunk_rows),
+        ..Default::default()
+    };
+    let mut writer =
+        ArrowRecordBatchWriter::<DefaultEncoder>::with_options(&path, schema.clone(), options)
+            .expect("a netCDF writer");
+    writer
+        .write_record_batch(RecordBatch::try_new(schema, arrays).unwrap())
+        .expect("write the batch");
+    writer.finish().expect("finish the file");
+
+    // One partition reads the whole file through one open, so through one cache.
+    let ctx = one_partition_session();
+    register(&ctx, "t", &path).await;
+    let batches = ctx
+        .sql("SELECT * FROM t")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+    let total: usize = batches.iter().map(|batch| batch.num_rows()).sum();
+    assert_eq!(total, rows);
 }
 
 /// `count` netCDF files in one directory, each holding `rows` rows of a
