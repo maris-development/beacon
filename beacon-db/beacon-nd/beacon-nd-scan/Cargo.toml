@@ -1,0 +1,24 @@
+[package]
+name = "beacon-nd-scan"
+version.workspace = true
+edition = "2024"
+rust-version.workspace = true
+description = "The DataFusion scan of the Beacon ND framework"
+license = "AGPL-3.0-only"
+repository = "https://github.com/maris-development/beacon"
+
+[dependencies]
+arrow = { workspace = true }
+datafusion = { workspace = true }
+datafusion-datasource = { workspace = true }
+object_store = { workspace = true }
+async-trait = { workspace = true }
+futures = { workspace = true }
+tracing = { workspace = true }
+beacon-nd-dataset = { path = "../beacon-nd-dataset" }
+beacon-nd-encoding = { path = "../../beacon-nd-encoding" }
+beacon-datafusion-ext = { path = "../../beacon-datafusion-ext" }
+
+[dev-dependencies]
+tokio = { workspace = true }
+beacon-nd-execution = { path = "../../beacon-nd-execution" }
