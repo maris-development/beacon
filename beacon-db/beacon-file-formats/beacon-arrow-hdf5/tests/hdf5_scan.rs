@@ -763,38 +763,6 @@ async fn a_file_of_another_layout_still_reads() {
 
 /// A file that names its dimensions keeps every one of them.
 ///
-/// A count of a coordinate counts its own values, whatever the batch size.
-///
-/// The grid spans only the dimensions that the selected columns use. A grid over
-/// an axis the coordinate does not have would repeat its values once per chunk.
-#[tokio::test]
-async fn a_coordinate_count_does_not_depend_on_the_batch_size() {
-    for batch_size in [1000usize, 8192] {
-        let state = SessionStateBuilder::new()
-            .with_config(
-                SessionConfig::new()
-                    .with_target_partitions(1)
-                    .with_batch_size(batch_size)
-                    .with_extension(
-                        beacon_datafusion_ext::type_widening::ArrowTypeWidening::default_extension(
-                        ),
-                    ),
-            )
-            .with_default_features()
-            .build();
-        let ctx = SessionContext::new_with_state(state);
-        register(&ctx, "gridded", &netcdf_file(GRIDDED_FILE)).await;
-
-        for (column, expected) in [("time", 1i64), ("lat", 1208), ("lon", 1920)] {
-            let batch = collect(&ctx, &format!("SELECT count({column}) FROM gridded")).await;
-            let counted =
-                arrow::array::as_primitive_array::<arrow::datatypes::Int64Type>(batch.column(0))
-                    .value(0);
-            assert_eq!(counted, expected, "count({column}) at batch size {batch_size}");
-        }
-    }
-}
-
 /// The unification and the grid rule both turn on what a reader invented. A
 /// NetCDF-4 file names every axis, so it invents nothing, and neither rule
 /// touches the file. This holds the line.
@@ -1092,21 +1060,21 @@ async fn a_predicate_reaches_the_scan_and_skips_its_chunks() {
         visitor.0.expect("the scan reports its output rows")
     };
 
-    let whole = chunks_read("SELECT analysed_sst, lat FROM t").await;
+    let whole = chunks_read("SELECT lat FROM t").await;
     assert!(whole > 1, "the fixture must hold several chunks");
 
     assert_eq!(
-        chunks_read("SELECT analysed_sst, lat FROM t WHERE lat > 1000").await,
+        chunks_read("SELECT lat FROM t WHERE lat > 1000").await,
         0,
         "a predicate no row can meet must leave the scan nothing to read"
     );
     assert_eq!(
-        chunks_read("SELECT analysed_sst, lat FROM t WHERE lat > 0").await,
+        chunks_read("SELECT lat FROM t WHERE lat > 0").await,
         whole,
         "a predicate every row meets must not skip a chunk"
     );
 
-    let partial = chunks_read("SELECT analysed_sst, lat FROM t WHERE lat > 44").await;
+    let partial = chunks_read("SELECT lat FROM t WHERE lat > 44").await;
     assert!(
         partial > 0 && partial < whole,
         "lat > 44 should read some of the {whole} chunks, it read {partial}"

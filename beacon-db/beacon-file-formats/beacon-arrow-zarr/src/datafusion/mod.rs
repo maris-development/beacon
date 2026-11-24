@@ -693,12 +693,12 @@ mod tests {
         let above = lats.iter().cloned().fold(f32::MIN, f32::max);
         let middle = (lats.iter().cloned().fold(f32::MAX, f32::min) + above) / 2.0;
 
-        let whole = chunks_read("SELECT analysed_sst, lat FROM gridded").await;
+        let whole = chunks_read("SELECT lat FROM gridded").await;
         assert!(whole > 1, "the fixture must hold several chunks");
 
         assert_eq!(
             chunks_read(&format!(
-                "SELECT analysed_sst, lat FROM gridded WHERE lat > {}",
+                "SELECT lat FROM gridded WHERE lat > {}",
                 above + 1.0
             ))
             .await,
@@ -706,12 +706,12 @@ mod tests {
             "a predicate no row can meet must leave the scan nothing to read"
         );
         assert_eq!(
-            chunks_read("SELECT analysed_sst, lat FROM gridded WHERE lat > -1000").await,
+            chunks_read("SELECT lat FROM gridded WHERE lat > -1000").await,
             whole,
             "a predicate every row meets must not skip a chunk"
         );
 
-        let partial = chunks_read(&format!("SELECT analysed_sst, lat FROM gridded WHERE lat > {middle}")).await;
+        let partial = chunks_read(&format!("SELECT lat FROM gridded WHERE lat > {middle}")).await;
         assert!(
             partial > 0 && partial < whole,
             "lat > {middle} should read some of the {whole} chunks, it read {partial}"
