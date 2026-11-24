@@ -78,6 +78,12 @@ released from a single `v*` tag. Releases before 2.0.0 are recorded in the
   column: use `REFRESH`, or drop the table and create it again. Else a stored `Float64` column gets
   the microseconds since 1970, with no error.
 
+- **TIFF reads through the ND framework.** The TIFF scan runs on the ND framework. The column names
+  and types do not change. One large raster reads on several partitions, and a filter on
+  `geo.lat` or `geo.lon` skips tiles. `COUNT(*)` and `LIMIT` reach the scan. A filter behind a cast,
+  such as `CAST("geo.lat" AS INT) = 40`, keeps each row that it matches. Before, it could drop rows.
+  A TIFF table does not support `PARTITIONED BY` now. A query on such a table gives an error.
+
 - **The server owns users and roles.** The engine has no users, no roles and no identity. The server
   checks each request, and it gives the engine the access rules of the caller. The server keeps
   users, roles and rules in `beacon-auth.json`, next to `beacon.db`. On the first start, it copies
