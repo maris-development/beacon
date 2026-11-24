@@ -16,9 +16,7 @@ use oxcdf::{AttributeValue, NcAttribute};
 /// A scalar becomes a length-1 array of the matching Arrow type. A plural
 /// value with one item is the same scalar. A plural value with more items is
 /// a length-1 `List`. A value with no Arrow type is left out.
-pub(crate) fn attributes_of<'a>(
-    attributes: impl IntoIterator<Item = &'a NcAttribute>,
-) -> Attributes {
+pub fn attributes_of<'a>(attributes: impl IntoIterator<Item = &'a NcAttribute>) -> Attributes {
     let mut result = Attributes::new();
     for attribute in attributes {
         let Some(value) = value_array(&attribute.value) else {

@@ -3,7 +3,8 @@
 use std::sync::Arc;
 
 use arrow::array::{
-    new_empty_array, new_null_array, ArrayRef, PrimitiveArray, StringArray, UInt64Array,
+    new_empty_array, new_null_array, ArrayRef, Float64Array, PrimitiveArray, StringArray,
+    UInt64Array,
 };
 use arrow::datatypes::{
     ArrowPrimitiveType, DataType, Float32Type, Float64Type, Int16Type, Int32Type, Int64Type,
@@ -14,6 +15,7 @@ use beacon_nd_dataset::{
     Dimension, Dimensions, Error, NdArrowArray, NdVariable, Region, Result, VariableInfo,
 };
 use indexmap::IndexMap;
+use nd_arrow_array::compute::cf::SCALE_FACTOR;
 use nd_arrow_array::Attributes;
 use oxcdf::{AsyncNetcdfFile, AsyncVariable, DType, Extent, Extents};
 
@@ -32,9 +34,9 @@ enum StringForm {
     Char,
 }
 
-/// One root variable of a NetCDF file.
+/// One variable of a NetCDF or HDF5 file.
 #[derive(Debug)]
-pub(crate) struct NetcdfVariable {
+pub struct NetcdfVariable {
     file: Arc<AsyncNetcdfFile>,
     /// The name of the dataset: the file location that the opener knows.
     dataset: Arc<str>,
@@ -52,7 +54,10 @@ pub(crate) struct NetcdfVariable {
 
 impl NetcdfVariable {
     /// `Err` with a reason when the rules cannot model the variable.
-    pub(crate) fn try_new(
+    ///
+    /// `name` is the column name. The path of `variable` binds the reads.
+    pub fn try_new(
+        name: Arc<str>,
         dataset: Arc<str>,
         file: Arc<AsyncNetcdfFile>,
         variable: &AsyncVariable<'_>,
@@ -104,7 +109,7 @@ impl NetcdfVariable {
         let attributes = attributes_of(variable.attributes());
         let decode = Decode::choose(&stored, &attributes);
         let data_type = decode.data_type(&stored, &attributes);
-        let info = VariableInfo::new(variable.name.as_str(), data_type, dimensions)
+        let info = VariableInfo::new(name, data_type, dimensions)
             .with_chunk_shape(chunk_shape)
             .with_attributes(attributes);
         Ok(NetcdfVariable {
@@ -117,6 +122,23 @@ impl NetcdfVariable {
             length,
             decode,
         })
+    }
+
+    /// The same variable, unpacked with the scale factor `scale`.
+    ///
+    /// A scale that the file keeps outside the `scale_factor` attribute.
+    pub fn with_scale_factor(mut self, scale: f64) -> NetcdfVariable {
+        let mut attributes = self.info.attributes.clone();
+        if let Err(error) =
+            attributes.try_insert_array(SCALE_FACTOR, Arc::new(Float64Array::from(vec![scale])))
+        {
+            tracing::warn!(variable = %self.info.name, %error, "no scale factor for the variable");
+            return self;
+        }
+        self.decode = Decode::choose(&self.stored, &attributes);
+        self.info.data_type = self.decode.data_type(&self.stored, &attributes);
+        self.info.attributes = attributes;
+        self
     }
 
     /// The stored values of one box inside `length`, in C order.
@@ -207,7 +229,7 @@ impl NetcdfVariable {
 ///
 /// `oxcdf` gives a short variable the length of its unlimited dimension, so
 /// the HDF5 dataset gives the stored length.
-pub(super) fn stored_length(variable: &AsyncVariable<'_>) -> Vec<usize> {
+pub fn stored_length(variable: &AsyncVariable<'_>) -> Vec<usize> {
     let shape = &variable.shape;
     let stored = variable
         .dataset()
@@ -381,8 +403,15 @@ mod tests {
         let phony = PhonyDimensions::of_file(file);
         let sizes = dimension_sizes(file, &phony);
         let variable = file.variable(name).unwrap();
-        NetcdfVariable::try_new(Arc::from("cf.nc"), file.clone(), &variable, &phony, &sizes)
-            .unwrap()
+        NetcdfVariable::try_new(
+            Arc::from(name),
+            Arc::from("cf.nc"),
+            file.clone(),
+            &variable,
+            &phony,
+            &sizes,
+        )
+        .unwrap()
     }
 
     /// Write `temp`, two `i16` values with a `scale_factor`, and open it as a variable.
