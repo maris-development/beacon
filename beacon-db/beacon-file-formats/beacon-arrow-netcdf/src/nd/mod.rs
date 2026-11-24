@@ -8,4 +8,4 @@ mod variable;
 
 pub use attributes::attributes_of;
 pub use opener::NetcdfOpener;
-pub use variable::{stored_length, NetcdfVariable};
+pub use variable::{pad, stored_length, NetcdfVariable};

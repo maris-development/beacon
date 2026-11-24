@@ -7,13 +7,14 @@
 
 use std::sync::Arc;
 
-use arrow::array::{ArrayRef, PrimitiveArray, StringArray};
+use arrow::array::{new_empty_array, ArrayRef, PrimitiveArray, StringArray};
 use arrow::datatypes::{
     ArrowPrimitiveType, DataType, Float32Type, Float64Type, Int16Type, Int32Type, Int64Type,
     Int8Type, UInt16Type, UInt32Type, UInt64Type, UInt8Type,
 };
 use async_trait::async_trait;
 use beacon_arrow_netcdf::dimensions::PhonyDimensions;
+use beacon_arrow_netcdf::nd::{pad, stored_length};
 use beacon_nd_dataset::{
     Attributes, Dimension, Dimensions, Error, NdArrowArray, NdVariable, Region, Result,
     VariableInfo,
@@ -74,6 +75,7 @@ pub(crate) fn member_variables(
             file: file.clone(),
             path: variable.path.clone(),
             info,
+            length: stored_length(variable),
             record_size: datatype.size as usize,
             offset: member.offset as usize,
             datatype: member.datatype.clone(),
@@ -118,6 +120,8 @@ pub(crate) struct CompoundMember {
     /// The path that binds the dataset in `file`.
     path: String,
     info: VariableInfo,
+    /// The stored length on each axis. It can be shorter than the dimension.
+    length: Vec<usize>,
     /// The width of one whole record.
     record_size: usize,
     /// The byte offset of the member in a record.
@@ -209,8 +213,39 @@ impl NdVariable for CompoundMember {
 
     async fn read(&self, region: &Region) -> Result<NdArrowArray> {
         region.check(self.name(), self.dimensions())?;
-        let raw = self.read_member(region.start(), region.shape()).await?;
-        let values: ArrayRef = match self.info.data_type {
+        // A dataset shorter than its dimension reads only its stored part.
+        let clipped: Vec<usize> = region
+            .start()
+            .iter()
+            .zip(region.shape())
+            .zip(&self.length)
+            .map(|((&start, &count), &length)| count.min(length.saturating_sub(start)))
+            .collect();
+        let values = if clipped.iter().product::<usize>() == 0 {
+            new_empty_array(&self.info.data_type)
+        } else {
+            self.read_values(region.start(), &clipped).await?
+        };
+        let values = if clipped == region.shape() {
+            values
+        } else {
+            pad(values, &clipped, region.shape())?
+        };
+        let dimensions = Dimensions::try_new(
+            self.dimensions()
+                .iter()
+                .zip(region.shape())
+                .map(|(dimension, &size)| Dimension::new(dimension.name(), size)),
+        )?;
+        Ok(NdArrowArray::try_new(values, dimensions)?)
+    }
+}
+
+impl CompoundMember {
+    /// The values of the box `start`/`count`, which lies inside the stored length.
+    async fn read_values(&self, start: &[usize], count: &[usize]) -> Result<ArrayRef> {
+        let raw = self.read_member(start, count).await?;
+        Ok(match self.info.data_type {
             DataType::Int8 => self.numbers::<Int8Type>(&raw)?,
             DataType::Int16 => self.numbers::<Int16Type>(&raw)?,
             DataType::Int32 => self.numbers::<Int32Type>(&raw)?,
@@ -225,14 +260,7 @@ impl NdVariable for CompoundMember {
                 let strings = raw.to_strings_of(&self.datatype).map_err(Error::format)?;
                 Arc::new(StringArray::from(strings))
             }
-        };
-        let dimensions = Dimensions::try_new(
-            self.dimensions()
-                .iter()
-                .zip(region.shape())
-                .map(|(dimension, &size)| Dimension::new(dimension.name(), size)),
-        )?;
-        Ok(NdArrowArray::try_new(values, dimensions)?)
+        })
     }
 }
 

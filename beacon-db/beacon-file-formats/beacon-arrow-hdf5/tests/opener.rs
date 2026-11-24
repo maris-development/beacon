@@ -245,3 +245,19 @@ async fn a_file_of_another_layout_reads_plainly_with_the_convention() {
     let dataset = open_with("instrument.h5", optodas()).await;
     assert!(dataset.variable("time").is_none());
 }
+
+/// A compound shorter than its dimension reads its records, then nulls.
+#[tokio::test]
+async fn a_short_compound_pads_with_nulls() {
+    use arrow::datatypes::Float64Type;
+    let dataset = open("short-compound.h5").await;
+    assert_eq!(dimension_names(dataset.as_ref(), "g/rec/a"), ["x"]);
+    assert_eq!(
+        values::<Int32Type>(dataset.as_ref(), "g/rec/a").await,
+        [Some(1), Some(2), Some(3), None, None]
+    );
+    assert_eq!(
+        values::<Float64Type>(dataset.as_ref(), "g/rec/b").await,
+        [Some(1.5), Some(2.5), Some(3.5), None, None]
+    );
+}

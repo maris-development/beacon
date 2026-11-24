@@ -59,6 +59,28 @@ def list_attribute() -> None:
         f.create_dataset("value", data=np.array([1, 2, 3], dtype=np.int32))
 
 
+def short_compound() -> None:
+    """A compound dataset on a dimension `x` that another group makes longer.
+
+    The root `x` holds 5 values and the `x` of group `g` holds 3. The compound
+    in `g` stores 3 records, so a read of the 5-long `x` pads it.
+    """
+    with h5py.File(os.path.join(HERE, "short-compound.h5"), "w") as f:
+        x = f.create_dataset("x", data=np.arange(5, dtype=np.int32))
+        x.make_scale("x")
+        value = f.create_dataset("value", data=np.arange(5, dtype=np.float64))
+        value.dims[0].attach_scale(x)
+
+        g = f.create_group("g")
+        gx = g.create_dataset("x", data=np.arange(3, dtype=np.int32))
+        gx.make_scale("x")
+        records = np.array(
+            [(1, 1.5), (2, 2.5), (3, 3.5)], dtype=[("a", "i4"), ("b", "f8")]
+        )
+        rec = g.create_dataset("rec", data=records)
+        rec.dims[0].attach_scale(gx)
+
+
 def compound() -> None:
     """A file holding one compound dataset.
 
@@ -241,7 +263,8 @@ if __name__ == "__main__":
     optodas()
     optodas_gap()
     list_attribute()
+    short_compound()
     print(
         "wrote nested-groups.h5, compound.h5, instrument.h5, optodas.h5, "
-        "optodas-gap.h5 and list-attribute.h5"
+        "optodas-gap.h5, list-attribute.h5 and short-compound.h5"
     )

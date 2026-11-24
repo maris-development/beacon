@@ -263,7 +263,9 @@ where
 }
 
 /// Place `values` of the shape `clipped` at the start of `shape`, with nulls elsewhere.
-fn pad(values: ArrayRef, clipped: &[usize], shape: &[usize]) -> Result<ArrayRef> {
+///
+/// A variable shorter than its dimension uses it to fill the rest of a region.
+pub fn pad(values: ArrayRef, clipped: &[usize], shape: &[usize]) -> Result<ArrayRef> {
     let len: usize = shape.iter().product();
     if values.is_empty() {
         return Ok(new_null_array(values.data_type(), len));

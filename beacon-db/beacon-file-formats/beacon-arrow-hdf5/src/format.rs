@@ -260,7 +260,19 @@ impl FileFormatFactoryExt for Hdf5FormatFactory {
         if hdf5.read_dimensions().is_some() {
             return None;
         }
-        Some(SchemaOptions::new("hdf5").str("rust").finish())
+        let convention = match hdf5.convention() {
+            Hdf5Convention::None => "none",
+            Hdf5Convention::OptoDas => "optodas",
+        };
+        // Each option that changes the schema is part of the key.
+        Some(
+            SchemaOptions::new("hdf5")
+                .str("nd")
+                .str(convention)
+                .bool(hdf5.unifies_phony_dimensions())
+                .bool(hdf5.skips_unbroadcastable())
+                .finish(),
+        )
     }
 }
 
@@ -423,7 +435,7 @@ impl FileFormat for Hdf5Format {
                         object.location,
                         e.message()
                     );
-                    // A ragged file stays NotImplemented, so a caller can tell it apart.
+                    // An unsupported file stays NotImplemented, so a caller can tell it apart.
                     match e {
                         DataFusionError::NotImplemented(_) => {
                             DataFusionError::NotImplemented(message)
@@ -692,6 +704,33 @@ mod tests {
             .unwrap();
         let hdf5 = format.downcast_ref::<Hdf5Format>().unwrap();
         assert!(!hdf5.unifies_phony_dimensions());
+    }
+
+    /// Each option that changes the schema gives its own schema cache key.
+    #[test]
+    fn the_schema_options_give_their_own_cache_keys() {
+        let ctx = session();
+        let f = factory("hdf5", Hdf5Config::default());
+        let key = |options: &[(&str, &str)]| {
+            let options: HashMap<String, String> = options
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+            let format = f.create(&ctx.state(), &options).unwrap();
+            f.schema_options_fingerprint(format.as_ref())
+        };
+        let default = key(&[]);
+        let optodas = key(&[("convention", "optodas")]);
+        let plain = key(&[("unify_phony_dimensions", "false")]);
+        assert!(default.is_some());
+        assert_ne!(default, optodas);
+        assert_ne!(default, plain);
+        assert_ne!(optodas, plain);
+        // The ND framework schema differs from the old reader's, so the old key is invalid.
+        assert_ne!(
+            default,
+            Some(SchemaOptions::new("hdf5").str("rust").finish())
+        );
     }
 
     /// The runtime setting decides when the table says nothing.
