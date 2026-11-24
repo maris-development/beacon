@@ -50,6 +50,29 @@ released from a single `v*` tag. Releases before 2.0.0 are recorded in the
 - **NetCDF scans run on DataFusion morsels.** The NetCDF format has its own scan. One large file
   still reads on several partitions, and a filter on a coordinate still skips chunks. A file whose
   selected grid fits in one batch is read as a whole.
+- **NetCDF reads through the ND framework.** Beacon decodes the CF conventions of a NetCDF variable
+  with the ND framework. Some column types and values change:
+  - A CF time variable is `Timestamp(Microsecond)`, not `Timestamp(Nanosecond)`.
+  - Packed values (`scale_factor`, `add_offset`) get the float type of those attributes, for
+    example `Float32`. Else they are `Float64`.
+  - `missing_value`, with one or more values, turns the values into nulls.
+  - `valid_min`, `valid_max` and `valid_range` turn the values outside the range into nulls.
+  - A `_FillValue` of another type than the variable applies. Beacon casts it to the type of the
+    variable.
+  - A packed time variable decodes to a timestamp, not to `Float64`.
+  - A NaN or infinite time value is null.
+  - A time unit in singular form, as an abbreviation or with capitals (`hour`, `h`, `Days`)
+    decodes. A time of day or a zone in the reference date applies. Before, Beacon ignored it.
+  - Calendar `julian` decodes. Calendars such as `noleap` and `360_day` stay numbers.
+  - The unit `nanoseconds since ...` stays numbers (`Int64`). Beacon's NetCDF writer writes this
+    unit for a `Timestamp(Nanosecond)` column, so such a file reads back as numbers.
+  - A variable shorter than its unlimited dimension gives nulls past its length.
+  - Beacon leaves out a variable that it cannot model, with its attribute columns. An example is
+    `m(x, x)` with a repeated dimension. Beacon then also leaves out `m.units`.
+
+  A stored table keeps its stored column types. Refresh each NetCDF table with a packed time
+  column: use `REFRESH`, or drop the table and create it again. Else a stored `Float64` column gets
+  the microseconds since 1970, with no error.
 
 - **The server owns users and roles.** The engine has no users, no roles and no identity. The server
   checks each request, and it gives the engine the access rules of the caller. The server keeps
