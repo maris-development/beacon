@@ -1087,7 +1087,16 @@ async fn a_time_filter_keeps_the_same_rows_with_the_prune() {
         .await
         .unwrap();
     let with_prune = collect(Arc::clone(&plan), pushed.task_ctx()).await.unwrap();
-    let without_prune = plain.sql(SQL).await.unwrap().collect().await.unwrap();
+    let plain_plan = plain
+        .sql(SQL)
+        .await
+        .unwrap()
+        .create_physical_plan()
+        .await
+        .unwrap();
+    let without_prune = collect(Arc::clone(&plain_plan), plain.task_ctx())
+        .await
+        .unwrap();
 
     let values = |batches: &[arrow::record_batch::RecordBatch]| -> Vec<f64> {
         batches
@@ -1105,6 +1114,7 @@ async fn a_time_filter_keeps_the_same_rows_with_the_prune() {
     assert_eq!(values(&with_prune), values(&without_prune));
     // Chunks of 2 rows: the chunk of days 0 and 1 is skipped.
     assert_eq!(scan_counter(&plan, "chunks_pruned"), 1);
+    assert_eq!(scan_counter(&plain_plan, "chunks_pruned"), 0);
 }
 
 #[tokio::test]

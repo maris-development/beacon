@@ -1,14 +1,12 @@
-//! DataFusion column statistics derived from NetCDF datasets.
+//! DataFusion column statistics derived from ND-array datasets.
 //!
-//! [`generate_statistics`] is the entry point.  It opens a NetCDF file and
-//! computes per-column min/max statistics for the columns listed in
-//! `table_schema`, dispatching to a regular-dataset or ragged-dataset path.
+//! [`statistics_for_dataset`] computes per-column min/max statistics for the
+//! columns listed in `table_schema`, dispatching to a regular-dataset or
+//! ragged-dataset path.
 //!
 //! Statistics are used by DataFusion's query optimizer for predicate pushdown
 //! and partition pruning.  Arrays for which a range cannot be determined
 //! (multi-dimensional, String, Binary) get [`ColumnStatistics::new_unknown`].
-
-use std::sync::Arc;
 
 use beacon_nd_array::{
     arrow::compute::value_range,
@@ -20,30 +18,11 @@ use datafusion::{
     scalar::ScalarValue,
 };
 
-use object_store::{ObjectMeta, ObjectStore};
-
 // ─── Public entry point ─────────────────────────────────────────────────────
-
-/// Open the NetCDF `object` and return DataFusion [`Statistics`] for the
-/// columns in `table_schema`. A ragged file is an error, as in the scan.
-pub async fn generate_statistics(
-    store: &Arc<dyn ObjectStore>,
-    object: &ObjectMeta,
-    table_schema: &arrow::datatypes::Schema,
-) -> anyhow::Result<Statistics> {
-    let dataset = crate::datafusion::open::open_whole(store, object)
-        .await
-        .map_err(|e| anyhow::anyhow!("NetCDF dataset {}: {e}", object.location))?;
-
-    statistics_for_dataset(&AnyDataset::Regular(dataset), table_schema).await
-}
 
 /// Return DataFusion [`Statistics`] for an already-opened dataset.
 ///
-/// [`generate_statistics`] opens a NetCDF object and calls this. Any other
-/// reader of the same [`AnyDataset`] model calls it directly, so every format
-/// built on ND arrays reports statistics the same way. `beacon-arrow-hdf5` does
-/// exactly that with its own reader.
+/// HDF5 uses this until it moves to the ND framework.
 pub async fn statistics_for_dataset(
     dataset: &AnyDataset,
     table_schema: &arrow::datatypes::Schema,

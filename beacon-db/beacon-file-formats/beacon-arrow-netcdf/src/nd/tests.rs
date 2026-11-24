@@ -10,8 +10,8 @@ use beacon_nd_scan::NdFileOpener;
 
 use super::NetcdfOpener;
 use crate::datafusion::test_util::{
-    local_object, test_file, write_cf_netcdf, write_regular_netcdf, TestVariable, GRIDDED_FILE,
-    WOD_FILE,
+    local_object, open_test_file, test_file, write_cf_netcdf, write_regular_netcdf, TestVariable,
+    GRIDDED_FILE, WOD_FILE,
 };
 use crate::oxcdf_reader::{open_file, read_arrays};
 
@@ -50,7 +50,7 @@ async fn the_format_name_is_netcdf() {
 
 #[tokio::test]
 async fn the_gridded_file_passes_validate() {
-    let dataset = open(&test_file(GRIDDED_FILE)).await.unwrap();
+    let dataset = open_test_file(GRIDDED_FILE).await;
     validate(dataset.as_ref()).unwrap();
     assert!(dataset.name().ends_with(GRIDDED_FILE), "{}", dataset.name());
 }
@@ -64,7 +64,7 @@ async fn a_ragged_file_is_unsupported() {
 
 #[tokio::test]
 async fn the_variables_are_sorted_by_name() {
-    let dataset = open(&test_file(GRIDDED_FILE)).await.unwrap();
+    let dataset = open_test_file(GRIDDED_FILE).await;
     let variables = file_variables(dataset.as_ref());
     let mut sorted = variables.clone();
     sorted.sort();

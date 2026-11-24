@@ -11,7 +11,8 @@ use arrow::datatypes::{
 use arrow::record_batch::RecordBatch;
 use beacon_datafusion_ext::fast_object::FastObjectTable;
 use beacon_datafusion_ext::listing_factory::ListingFactory;
-use beacon_nd_array::dataset::Dataset;
+use beacon_nd_dataset::NdDataset;
+use beacon_nd_scan::NdFileOpener;
 use datafusion::datasource::listing::ListingTableUrl;
 use datafusion::execution::session_state::SessionStateBuilder;
 use datafusion::prelude::{SessionConfig, SessionContext};
@@ -21,6 +22,7 @@ use oxcdf::{AttributeValue, DType, Extent, Extents};
 use super::options::NetcdfOptions;
 use super::NetcdfFormat;
 use crate::encoders::default::DefaultEncoder;
+use crate::nd::NetcdfOpener;
 use crate::writer::ArrowRecordBatchWriter;
 
 /// A regular gridded file: `analysed_sst` on `[time, lat, lon]`, with `lat` in 2 native chunks.
@@ -44,9 +46,9 @@ pub(crate) async fn local_object(path: &Path) -> (Arc<dyn ObjectStore>, ObjectMe
 }
 
 /// Open a bundled regular test file.
-pub(crate) async fn open_test_file(name: &str) -> Dataset {
+pub(crate) async fn open_test_file(name: &str) -> Arc<dyn NdDataset> {
     let (store, object) = local_object(&test_file(name)).await;
-    super::open::open_whole(&store, &object).await.unwrap()
+    NetcdfOpener.open(store, &object).await.unwrap()
 }
 
 /// Write the `Float64` columns of `columns` to a new NetCDF file at `path`.

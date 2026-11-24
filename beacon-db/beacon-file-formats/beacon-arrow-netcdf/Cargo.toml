@@ -26,8 +26,6 @@ serde = { workspace = true }
 utoipa = { workspace = true }
 object_store = { workspace = true }
 datafusion = { workspace = true }
-# The morsel API. The `datafusion` crate does not re-export it.
-datafusion-datasource = { workspace = true }
 chrono = { workspace = true }
 nd-arrow-array = { workspace = true }
 beacon-nd-dataset = { path = "../../beacon-nd/beacon-nd-dataset" }
