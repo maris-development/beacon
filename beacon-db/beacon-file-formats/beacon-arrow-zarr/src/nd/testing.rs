@@ -76,8 +76,6 @@ test_element!(String, string, "");
 test_element!(Vec<u8>, bytes, Vec::<u8>::new());
 
 /// Write one group node with `attributes` at `path`.
-// The group tests of a later change use this helper.
-#[allow(dead_code)]
 pub(crate) async fn write_group(store: &TestStore, path: &str, attributes: Value) {
     GroupBuilder::new()
         .attributes(object(attributes))
@@ -118,6 +116,21 @@ pub(crate) async fn write_array<T: TestElement>(
             .await
             .unwrap(),
     )
+}
+
+/// Write the metadata of one `complex64` array, a type that Beacon does not read.
+pub(crate) async fn write_unsupported_array(store: &TestStore, path: &str, shape: &[u64]) {
+    ArrayBuilder::new(
+        shape.to_vec(),
+        shape.to_vec(),
+        data_type::complex64(),
+        FillValue::from([0u8; 8]),
+    )
+    .build(store.zarr.clone(), path)
+    .unwrap()
+    .async_store_metadata()
+    .await
+    .unwrap();
 }
 
 /// The JSON object of `value`.
