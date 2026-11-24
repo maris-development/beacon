@@ -36,3 +36,5 @@ pub mod datafusion;
 pub mod dimensions;
 /// Pure-Rust NetCDF reader over `object_store`.
 pub mod oxcdf_reader;
+/// NetCDF on the ND framework (`beacon-nd-dataset`, `beacon-nd-scan`).
+pub mod nd;
