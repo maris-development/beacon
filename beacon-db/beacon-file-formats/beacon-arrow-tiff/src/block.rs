@@ -6,13 +6,16 @@
 
 use std::{ops::Range, sync::Arc};
 
+use arrow::datatypes::{
+    ArrowNativeType, ArrowPrimitiveType, Float32Type, Float64Type, Int8Type, Int16Type, Int32Type,
+    Int64Type, UInt8Type, UInt16Type, UInt32Type, UInt64Type,
+};
 use async_tiff::ImageFileDirectory;
 use async_tiff::decoder::{Decoder, DecoderRegistry};
 use async_tiff::reader::{AsyncFileReader, Endianness};
 use async_tiff::tags::{
     Compression, PhotometricInterpretation, PlanarConfiguration, Predictor, SampleFormat,
 };
-use beacon_nd_array::datatypes::NdArrayType;
 use bytes::Bytes;
 
 use crate::reader::ObjectStoreAsyncReader;
@@ -80,7 +83,10 @@ fn unpack_bits(data: &[u8]) -> Option<Vec<u8>> {
 }
 
 /// A pixel sample type that a TIFF block can hold.
-pub(crate) trait TiffSample: NdArrayType + Copy + Default {
+pub(crate) trait TiffSample: ArrowNativeType + 'static {
+    /// The Arrow type of a band of this sample type.
+    type Arrow: ArrowPrimitiveType<Native = Self>;
+
     /// The size of one sample in bytes.
     const BYTES: usize;
 
@@ -89,11 +95,15 @@ pub(crate) trait TiffSample: NdArrayType + Copy + Default {
 
     /// Parse a `GDAL_NODATA` value. Returns `None` when the type cannot hold it.
     fn parse_nodata(text: &str) -> Option<Self>;
+
+    /// True when this sample is the nodata value. A NaN nodata matches each NaN.
+    fn is_nodata(self, nodata: Self) -> bool;
 }
 
 macro_rules! impl_int_sample {
-    ($($T:ty),*) => {$(
+    ($($T:ty => $A:ty),*) => {$(
         impl TiffSample for $T {
+            type Arrow = $A;
             const BYTES: usize = std::mem::size_of::<$T>();
 
             fn from_ne_slice(bytes: &[u8]) -> Self {
@@ -111,13 +121,18 @@ macro_rules! impl_int_sample {
                     && value <= <$T>::MAX as f64;
                 exact.then_some(value as $T)
             }
+
+            fn is_nodata(self, nodata: Self) -> bool {
+                self == nodata
+            }
         }
     )*};
 }
 
 macro_rules! impl_float_sample {
-    ($($T:ty),*) => {$(
+    ($($T:ty => $A:ty),*) => {$(
         impl TiffSample for $T {
+            type Arrow = $A;
             const BYTES: usize = std::mem::size_of::<$T>();
 
             fn from_ne_slice(bytes: &[u8]) -> Self {
@@ -127,12 +142,19 @@ macro_rules! impl_float_sample {
             fn parse_nodata(text: &str) -> Option<Self> {
                 text.parse::<f64>().ok().map(|value| value as $T)
             }
+
+            fn is_nodata(self, nodata: Self) -> bool {
+                self == nodata || (self.is_nan() && nodata.is_nan())
+            }
         }
     )*};
 }
 
-impl_int_sample!(i8, i16, i32, i64, u8, u16, u32, u64);
-impl_float_sample!(f32, f64);
+impl_int_sample!(
+    i8 => Int8Type, i16 => Int16Type, i32 => Int32Type, i64 => Int64Type,
+    u8 => UInt8Type, u16 => UInt16Type, u32 => UInt32Type, u64 => UInt64Type
+);
+impl_float_sample!(f32 => Float32Type, f64 => Float64Type);
 
 /// The geometry and the decode settings of the blocks of one TIFF image.
 #[derive(Debug)]
@@ -556,6 +578,15 @@ mod tests {
     fn unpack_bits_rejects_a_truncated_run() {
         assert_eq!(unpack_bits(&[0x03, 0x01, 0x02]), None);
         assert_eq!(unpack_bits(&[0xFE]), None);
+    }
+
+    #[test]
+    fn nan_nodata_matches_nan() {
+        assert!(f32::NAN.is_nodata(f32::NAN));
+        assert!(f64::NAN.is_nodata(f64::NAN));
+        assert!(!1.0f32.is_nodata(f32::NAN));
+        assert!(!f32::NAN.is_nodata(-9999.0));
+        assert!((-9999i16).is_nodata(-9999));
     }
 
     #[test]

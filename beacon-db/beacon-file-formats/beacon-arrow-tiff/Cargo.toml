@@ -25,6 +25,9 @@ beacon-common = { path = "../../beacon-common" }
 beacon-datafusion-ext = { path = "../../beacon-datafusion-ext" }
 beacon-nd-execution = { path = "../../beacon-nd-execution" }
 beacon-nd-array = { path = "../beacon-nd-array" }
+beacon-nd-dataset = { path = "../../beacon-nd/beacon-nd-dataset" }
+beacon-nd-scan = { path = "../../beacon-nd/beacon-nd-scan" }
+nd-arrow-array = { workspace = true }
 ndarray = {workspace = true}
 
 [dev-dependencies]
