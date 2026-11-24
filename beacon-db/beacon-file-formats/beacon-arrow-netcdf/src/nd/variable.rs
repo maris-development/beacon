@@ -203,7 +203,7 @@ impl NetcdfVariable {
 ///
 /// `oxcdf` gives a short variable the length of its unlimited dimension, so
 /// the HDF5 dataset gives the stored length.
-fn stored_length(variable: &AsyncVariable<'_>) -> Vec<usize> {
+pub(super) fn stored_length(variable: &AsyncVariable<'_>) -> Vec<usize> {
     let shape = &variable.shape;
     let stored = variable
         .dataset()

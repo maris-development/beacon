@@ -1,7 +1,12 @@
 //! NetCDF on the ND framework.
 
 mod attributes;
+mod dataset;
 mod decode;
-// The NetCDF opener uses the variable in a later change.
-#[allow(dead_code)]
+mod opener;
 mod variable;
+
+pub use opener::NetcdfOpener;
+
+#[cfg(test)]
+mod tests;
