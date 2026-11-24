@@ -15,6 +15,7 @@ pub mod compat;
 pub mod config;
 pub mod data_types;
 pub mod datafusion;
+pub mod nd;
 pub mod reader;
 pub mod util;
 pub mod writer;

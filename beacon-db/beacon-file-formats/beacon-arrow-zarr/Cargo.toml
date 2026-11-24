@@ -22,7 +22,10 @@ hifitime = {workspace = true}
 futures = { workspace = true }
 tempfile = { workspace = true }
 zip = { workspace = true }
+nd-arrow-array = { workspace = true }
 
+beacon-nd-dataset = { path = "../../beacon-nd/beacon-nd-dataset" }
+beacon-nd-scan = { path = "../../beacon-nd/beacon-nd-scan" }
 beacon-nd-array = { path = "../beacon-nd-array" }
 beacon-datafusion-ext = { path = "../../beacon-datafusion-ext" }
 beacon-nd-execution = { path = "../../beacon-nd-execution" }
