@@ -20,13 +20,11 @@ ndarray = "0.17"
 ordered-float = { workspace = true }
 num-traits = {workspace = true}
 hifitime = {workspace = true}
-julian = {workspace = true}
 tracing = { workspace = true }
 serde = { workspace = true }
 utoipa = { workspace = true }
 object_store = { workspace = true }
 datafusion = { workspace = true }
-chrono = { workspace = true }
 nd-arrow-array = { workspace = true }
 beacon-nd-dataset = { path = "../../beacon-nd/beacon-nd-dataset" }
 beacon-nd-scan = { path = "../../beacon-nd/beacon-nd-scan" }
@@ -39,3 +37,4 @@ beacon-common = { path = "../../beacon-common" }
 [dev-dependencies]
 tokio = { workspace = true }
 serde_json = { workspace = true }
+chrono = { workspace = true }

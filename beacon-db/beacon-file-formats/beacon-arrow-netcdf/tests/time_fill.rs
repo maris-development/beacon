@@ -8,7 +8,8 @@
 use std::sync::Arc;
 
 use arrow::array::{Array, TimestampNanosecondArray};
-use beacon_arrow_netcdf::oxcdf_reader::read_arrays;
+use beacon_arrow_netcdf::dimensions::PhonyDimensions;
+use beacon_arrow_netcdf::oxcdf_reader::compat;
 use beacon_nd_array::{
     arrow::array::ndarray_to_arrow_array, datatypes::TimestampNanosecond, NdArray, NdArrayD,
 };
@@ -49,10 +50,11 @@ async fn time_array() -> Arc<dyn NdArrayD> {
             .await
             .expect("open the fixture"),
     );
-    read_arrays(&file)
+    let variable = file
+        .variable("time")
+        .expect("the fixture holds a 'time' variable");
+    compat::variable_to_nd_array(file.clone(), &variable, &PhonyDimensions::none())
         .expect("read the fixture")
-        .swap_remove("time")
-        .expect("the fixture holds a 'time' variable")
 }
 
 /// The fill value carries the CF arithmetic of the variable, not the raw number.

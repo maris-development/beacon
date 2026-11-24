@@ -244,16 +244,6 @@ impl PhonyDimensions {
         self
     }
 
-    /// Whether this renames anything.
-    pub fn is_empty(&self) -> bool {
-        self.renames.is_empty()
-    }
-
-    /// How many dimensions this renames.
-    pub fn len(&self) -> usize {
-        self.renames.len()
-    }
-
     /// The dimension names of one variable, after the renames.
     ///
     /// Rule 4 applies here: an axis whose new name an earlier axis of the same
@@ -420,7 +410,7 @@ mod tests {
     #[test]
     fn a_file_that_names_every_axis_renames_nothing() {
         let phony = PhonyDimensions::of_axes(vec![named("time", 3)]);
-        assert!(phony.is_empty());
+        assert!(phony.invented_names().is_empty());
         assert_eq!(phony.apply(&["time".to_string()]), vec!["time".to_string()]);
     }
 

@@ -1082,7 +1082,6 @@ dependencies = [
  "futures",
  "hifitime",
  "indexmap 2.14.0",
- "julian",
  "nd-arrow-array",
  "ndarray 0.17.2",
  "num-traits",

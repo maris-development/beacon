@@ -4,12 +4,12 @@ use std::path::Path;
 use std::sync::Arc;
 
 use arrow::array::{Array, Float64Array};
-use beacon_nd_array::arrow::array::ndarray_to_arrow_array;
+use arrow::datatypes::DataType;
 use beacon_nd_dataset::{validate, ChunkGrid, Error, NdDataset, Region};
 use beacon_nd_scan::NdFileOpener;
 
 use beacon_arrow_netcdf::nd::NetcdfOpener;
-use beacon_arrow_netcdf::oxcdf_reader::{open_file, read_arrays};
+use beacon_arrow_netcdf::oxcdf_reader::open_file;
 
 mod common;
 use common::{
@@ -36,13 +36,6 @@ fn file_variables(dataset: &dyn NdDataset) -> Vec<String> {
         .into_iter()
         .filter(|name| !name.contains('.'))
         .collect()
-}
-
-/// The keys of `read_arrays` for the file at `path`.
-async fn old_keys(path: &Path) -> Vec<String> {
-    let (store, object) = local_object(path).await;
-    let file = Arc::new(open_file(store, &object).await.unwrap());
-    read_arrays(&file).unwrap().keys().cloned().collect()
 }
 
 #[tokio::test]
@@ -76,17 +69,23 @@ async fn the_variables_are_sorted_by_name() {
 
 #[tokio::test]
 async fn the_attribute_columns_are_present() {
-    let path = test_file(GRIDDED_FILE);
-    let dataset = open(&path).await.unwrap();
+    let dataset = open_test_file(GRIDDED_FILE).await;
     let names = names(dataset.as_ref());
-    let attributes: Vec<String> = old_keys(&path)
-        .await
-        .into_iter()
-        .filter(|key| key.contains('.'))
-        .collect();
-    assert!(!attributes.is_empty());
-    for key in &attributes {
-        assert!(names.contains(key), "{key} is not a variable");
+    // Global attributes take a leading dot, variable attributes the variable name.
+    for key in [
+        ".Conventions",
+        ".title",
+        "analysed_sst._FillValue",
+        "analysed_sst.scale_factor",
+        "analysed_sst.units",
+        "lat.valid_min",
+        "mask.flag_meanings",
+        "time.calendar",
+    ] {
+        assert!(
+            names.iter().any(|name| name == key),
+            "{key} is not a variable"
+        );
     }
 }
 
@@ -96,22 +95,15 @@ async fn a_plain_file_keeps_its_types_and_values() {
     let path = write_regular_netcdf(dir.path(), "plain.nc", 5);
     let dataset = open(&path).await.unwrap();
 
-    let (store, object) = local_object(&path).await;
-    let file = Arc::new(open_file(store, &object).await.unwrap());
-    let old = read_arrays(&file).unwrap();
-    let mut count = 0;
-    for (name, array) in old.iter().filter(|(name, _)| !name.contains('.')) {
-        let expected = ndarray_to_arrow_array(array.as_ref()).await.unwrap();
-        let variable = dataset.variable(name).unwrap();
-        assert_eq!(variable.data_type(), expected.data_type(), "{name}");
-        let read = variable
-            .read(&Region::full(variable.dimensions()))
-            .await
-            .unwrap();
-        assert_eq!(read.values().as_ref(), expected.as_ref(), "{name}");
-        count += 1;
-    }
-    assert!(count > 0);
+    assert_eq!(file_variables(dataset.as_ref()), ["V0"]);
+    let variable = dataset.variable("V0").unwrap();
+    assert_eq!(variable.data_type(), &DataType::Float64);
+    let read = variable
+        .read(&Region::full(variable.dimensions()))
+        .await
+        .unwrap();
+    let expected = Float64Array::from(vec![0.0, 1.0, 2.0, 3.0, 4.0]);
+    assert_eq!(read.values().as_ref(), &expected as &dyn Array);
 }
 
 #[tokio::test]

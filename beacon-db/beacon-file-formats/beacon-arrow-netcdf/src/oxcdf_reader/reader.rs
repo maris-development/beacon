@@ -1,45 +1,19 @@
-//! High-level [`oxcdf`] reader that produces [`AnyDataset`] values.
+//! Open a NetCDF object through [`object_store`].
 //!
-//! The entry point is [`open_dataset`]. It opens an object through
-//! [`object_store`], turns every variable and attribute into a lazy
-//! [`NdArrayD`] wrapper, and returns the result as an [`AnyDataset`].
-//!
-//! # CF conventions
-//!
-//! - A variable whose last dimension name starts with `string`, `strlen` or
-//!   `strnlen` decodes as UTF-8 strings instead of raw characters.
-//! - A variable with a `units` attribute in the CF time form (for example
-//!   `"days since 1950-01-01"`) decodes as nanosecond timestamps.
-//! - `scale_factor` and `add_offset` decode a packed variable to `f64`.
-//!
-//! # Naming conventions
-//!
-//! - Each variable becomes a named array in the dataset.
-//! - A variable attribute becomes an array named `"variable_name.attribute_name"`.
-//! - A global attribute becomes an array named `".attribute_name"`.
-//!
-//! # Groups
-//!
-//! Only the root group is read.
-//!
-//! # Dimensions
-//!
-//! A file that names no dimension, which is every plain HDF5 file, gets the
-//! dimensions netCDF invents. [`crate::dimensions`] gives every invented axis of
-//! one length one name, so two groups of one file broadcast against each other.
-//! A NetCDF-4 file names every dimension and is untouched.
+//! [`open_file`] opens the file. [`compat`](crate::oxcdf_reader::compat) turns
+//! its variables and attributes into lazy ND arrays.
 //!
 //! # Example
 //!
 //! ```no_run
 //! # use std::sync::Arc;
 //! # async fn example(store: Arc<dyn object_store::ObjectStore>) -> anyhow::Result<()> {
-//! use object_store::path::Path;
+//! use object_store::{path::Path, ObjectStoreExt};
 //!
-//! let any =
-//!     beacon_arrow_netcdf::oxcdf_reader::open_dataset(store, Path::from("data.nc")).await?;
-//! for name in any.dataset().arrays.keys() {
-//!     println!("{name}");
+//! let object = store.head(&Path::from("data.nc")).await?;
+//! let file = beacon_arrow_netcdf::oxcdf_reader::open_file(store, &object).await?;
+//! for variable in &file.root().variables {
+//!     println!("{}", variable.name);
 //! }
 //! # Ok(())
 //! # }
@@ -47,60 +21,14 @@
 
 use std::sync::Arc;
 
-use beacon_nd_array::{
-    dataset::{AnyDataset, Dataset},
-    NdArrayD,
-};
-use indexmap::IndexMap;
-use object_store::{path::Path, ObjectMeta, ObjectStore};
+use object_store::{ObjectMeta, ObjectStore};
 use oxcdf::{async_source::AsyncObjectStoreSource, AsyncNetcdfFile, OpenOptions};
 
-use crate::dimensions::PhonyDimensions;
-use crate::oxcdf_reader::compat;
-
-/// Open a NetCDF object from `store` and return its contents as an
-/// [`AnyDataset`].
-///
-/// No scan calls it: the NetCDF scan uses [`crate::nd`]. It stays until HDF5 moves to the ND framework.
+/// Open the file that `object` describes, with the size from `object`.
 ///
 /// The reader fetches byte ranges. It never copies the whole object, so an
-/// object in S3, GCS or Azure needs no local file.
-///
-/// Variable data is **not** read eagerly. The backends fetch data on demand
-/// when individual arrays are accessed.
-///
-/// # Errors
-///
-/// Returns an error when the object cannot be opened, or when a variable uses a
-/// type this reader does not support.
-pub async fn open_dataset(store: Arc<dyn ObjectStore>, path: Path) -> anyhow::Result<AnyDataset> {
-    let name = path.to_string();
-    let file = Arc::new(AsyncNetcdfFile::open_store(store, path).await?);
-    dataset_from_file(name, file).await
-}
-
-/// Open the NetCDF object that `object` describes and return its contents as an
-/// [`AnyDataset`].
-///
-/// This is [`open_dataset`] for an object that a listing already found. The
-/// size comes from `object`, so the open sends no `head` request.
-///
-/// No scan calls it: the NetCDF scan uses [`crate::nd`]. It stays until HDF5 moves to the ND framework.
-///
-/// # Errors
-///
-/// Returns an error when the object cannot be opened, or when a variable uses a
-/// type this reader does not support.
-pub async fn open_object(
-    store: Arc<dyn ObjectStore>,
-    object: &ObjectMeta,
-) -> anyhow::Result<AnyDataset> {
-    let name = object.location.to_string();
-    let file = Arc::new(open_file(store, object).await?);
-    dataset_from_file(name, file).await
-}
-
-/// Open the file that `object` describes, with the size from `object`.
+/// object in S3, GCS or Azure needs no local file. The size comes from
+/// `object`, so the open sends no `head` request.
 ///
 /// # Errors
 ///
@@ -113,83 +41,18 @@ pub async fn open_file(
     AsyncNetcdfFile::open_with(Arc::new(source), OpenOptions::remote()).await
 }
 
-/// The dataset of [`open_dataset`] and [`open_object`]; it stays until HDF5 moves to the ND framework.
-async fn dataset_from_file(name: String, file: Arc<AsyncNetcdfFile>) -> anyhow::Result<AnyDataset> {
-    let phony = PhonyDimensions::of_file(&file);
-    let arrays = read_arrays(&file)?;
-    // A file that names no dimension is an instrument file, and `SELECT *`
-    // picks its grid by volume rather than by variable count.
-    let dataset = Dataset::new(name, arrays)
-        .await
-        .with_invented_dimensions(phony.invented_names().iter().cloned());
-    AnyDataset::try_from_dataset(dataset).await
-}
-
-/// Read every variable and attribute of an opened file into an ordered map of
-/// lazy ND arrays.
-///
-/// The map is sorted by key, so iteration order is stable. This is the
-/// lower-level building block behind [`open_dataset`].
-///
-/// No scan calls it. It is the test oracle of `nd/tests.rs` until HDF5 moves to the ND framework.
-///
-/// # Errors
-///
-/// Returns an error when an attribute of the file cannot be read. A variable
-/// this reader cannot model is skipped.
-pub fn read_arrays(
-    file: &Arc<AsyncNetcdfFile>,
-) -> anyhow::Result<IndexMap<String, Arc<dyn NdArrayD>>> {
-    let mut arrays: IndexMap<String, Arc<dyn NdArrayD>> = IndexMap::new();
-
-    // A file that names no dimension gets one invented name per length per
-    // group. Give every length one name instead, so two groups of one file
-    // broadcast against each other. A NetCDF-4 file names every dimension, so
-    // this renames nothing there.
-    let phony = PhonyDimensions::of_file(file);
-
-    // ── Variables and their per-variable attributes ──────────────────────
-    for info in &file.root().variables {
-        let Some(variable) = file.variable(&info.path) else {
-            continue;
-        };
-
-        if let Ok(array) = compat::variable_to_nd_array(file.clone(), &variable, &phony) {
-            arrays.insert(info.name.clone(), array);
-        }
-
-        for attribute in variable.attributes() {
-            let full_name = format!("{}.{}", info.name, attribute.name);
-            if let Ok(array) = compat::attribute_to_nd_array(&full_name, &attribute.value) {
-                arrays.insert(full_name, array);
-            }
-        }
-    }
-
-    // ── Global file attributes ──────────────────────────────────────────
-    for attribute in file.attributes() {
-        let key = format!(".{}", attribute.name);
-        if let Ok(array) = compat::attribute_to_nd_array(&key, &attribute.value) {
-            arrays.insert(key, array);
-        }
-    }
-
-    // Deterministic ordering by name.
-    arrays.sort_keys();
-
-    Ok(arrays)
-}
-
 // ─── Tests ─────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dimensions::PhonyDimensions;
+    use crate::oxcdf_reader::compat;
     use beacon_nd_array::{
         datatypes::{NdArrayDataType, TimestampNanosecond},
-        NdArray,
+        NdArray, NdArrayD,
     };
-    use object_store::local::LocalFileSystem;
+    use object_store::{local::LocalFileSystem, path::Path, ObjectStoreExt};
 
     const WOD_FILE: &str = "wod_ctd_1964.nc";
     const GRIDDED_FILE: &str = "gridded-example.nc";
@@ -200,25 +63,21 @@ mod tests {
         Arc::new(LocalFileSystem::new_with_prefix(root).expect("test_files store"))
     }
 
-    async fn open(file: &str) -> AnyDataset {
-        open_dataset(test_store(), Path::from(file))
-            .await
-            .unwrap_or_else(|e| panic!("open {file}: {e}"))
+    async fn open(file: &str) -> Arc<AsyncNetcdfFile> {
+        let store = test_store();
+        let object = store.head(&Path::from(file)).await.unwrap();
+        Arc::new(
+            open_file(store, &object)
+                .await
+                .unwrap_or_else(|e| panic!("open {file}: {e}")),
+        )
     }
 
-    // ── Opening ────────────────────────────────────────────────────────
-
-    #[tokio::test]
-    async fn open_dataset_reads_a_ragged_file() {
-        let any = open(WOD_FILE).await;
-        assert!(any.is_ragged(), "the WOD file is a ragged dataset");
-        assert!(!any.dataset().arrays.is_empty());
-    }
-
-    #[tokio::test]
-    async fn open_dataset_reads_a_gridded_file() {
-        let any = open(GRIDDED_FILE).await;
-        assert!(any.get_array("analysed_sst").is_some());
+    /// The ND array of the root variable `name`.
+    fn array(file: &Arc<AsyncNetcdfFile>, name: &str) -> Arc<dyn NdArrayD> {
+        let variable = file.variable(name).unwrap();
+        compat::variable_to_nd_array(file.clone(), &variable, &PhonyDimensions::of_file(file))
+            .unwrap()
     }
 
     /// A store that counts the `head` requests it gets.
@@ -297,44 +156,17 @@ mod tests {
 
     /// A listed object carries its size, so the open sends no `head` request.
     #[tokio::test]
-    async fn open_object_sends_no_head_request() {
-        use object_store::ObjectStoreExt;
-
+    async fn open_file_sends_no_head_request() {
         let object = test_store().head(&Path::from(WOD_FILE)).await.unwrap();
         let store = Arc::new(HeadCountingStore {
             inner: test_store(),
             heads: Default::default(),
         });
 
-        let any = open_object(store.clone(), &object).await.unwrap();
+        let file = open_file(store.clone(), &object).await.unwrap();
 
-        assert!(!any.dataset().arrays.is_empty());
+        assert!(!file.root().variables.is_empty());
         assert_eq!(store.heads.load(std::sync::atomic::Ordering::SeqCst), 0);
-    }
-
-    #[tokio::test]
-    async fn open_dataset_returns_an_error_for_a_missing_object() {
-        assert!(open_dataset(test_store(), Path::from("nope.nc"))
-            .await
-            .is_err());
-    }
-
-    #[tokio::test]
-    async fn dataset_name_is_the_object_path() {
-        let any = open(WOD_FILE).await;
-        assert_eq!(any.name(), WOD_FILE);
-    }
-
-    /// The decoded `analysed_sst` values of a dataset.
-    async fn sst_values(dataset: &AnyDataset) -> Vec<f64> {
-        dataset
-            .get_array("analysed_sst")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<NdArray<f64>>()
-            .unwrap()
-            .clone_into_raw_vec()
-            .await
     }
 
     // ── Chunk shape ────────────────────────────────────────────────────
@@ -343,28 +175,28 @@ mod tests {
     /// full shape. The nd engine reads one chunk at a time with it.
     #[tokio::test]
     async fn a_chunked_variable_reports_the_chunk_shape_of_the_file() {
-        let any = open(GRIDDED_FILE).await;
+        let file = open(GRIDDED_FILE).await;
 
-        let sst = any.get_array("analysed_sst").unwrap();
+        let sst = array(&file, "analysed_sst");
         assert_eq!(sst.shape(), vec![1, 1208, 1920]);
         assert_eq!(sst.chunk_shape(), vec![1, 604, 960]);
 
-        let error = any.get_array("analysis_error").unwrap();
+        let error = array(&file, "analysis_error");
         assert_eq!(error.chunk_shape(), vec![1, 604, 960]);
 
-        let lon = any.get_array("lon").unwrap();
+        let lon = array(&file, "lon");
         assert_eq!(lon.chunk_shape(), vec![1920]);
     }
 
     /// One chunk holds the whole array. The two shapes are then equal.
     #[tokio::test]
     async fn a_single_chunk_reports_the_full_shape() {
-        let any = open(GRIDDED_FILE).await;
+        let file = open(GRIDDED_FILE).await;
 
-        let ice = any.get_array("sea_ice_fraction").unwrap();
+        let ice = array(&file, "sea_ice_fraction");
         assert_eq!(ice.chunk_shape(), vec![1, 1208, 1920]);
 
-        let mask = any.get_array("mask").unwrap();
+        let mask = array(&file, "mask");
         assert_eq!(mask.chunk_shape(), vec![1, 1208, 1920]);
     }
 
@@ -373,14 +205,23 @@ mod tests {
     /// variables, which drop their length axis from both shapes.
     #[tokio::test]
     async fn a_variable_with_no_chunks_reports_the_full_shape() {
-        let any = open(WOD_FILE).await;
-        for (name, array) in &any.dataset().arrays {
+        let file = open(WOD_FILE).await;
+        let phony = PhonyDimensions::of_file(&file);
+        let mut count = 0;
+        for info in &file.root().variables {
+            let variable = file.variable(&info.path).unwrap();
+            let Ok(array) = compat::variable_to_nd_array(file.clone(), &variable, &phony) else {
+                continue;
+            };
             assert_eq!(
                 array.chunk_shape(),
                 array.shape(),
-                "'{name}' has no chunks, so it must report its full shape"
+                "'{}' has no chunks, so it must report its full shape",
+                info.name
             );
+            count += 1;
         }
+        assert!(count > 0);
     }
 
     // ── CF decoding ────────────────────────────────────────────────────
@@ -390,16 +231,21 @@ mod tests {
     /// kelvin range.
     #[tokio::test]
     async fn scale_and_offset_decode_to_f64() {
-        let any = open(GRIDDED_FILE).await;
+        let file = open(GRIDDED_FILE).await;
 
-        let array = any.get_array("analysed_sst").unwrap();
+        let array = array(&file, "analysed_sst");
         assert_eq!(array.datatype(), NdArrayDataType::F64);
 
-        let rust_values = sst_values(&any).await;
+        let values = array
+            .as_any()
+            .downcast_ref::<NdArray<f64>>()
+            .unwrap()
+            .clone_into_raw_vec()
+            .await;
 
         // The fill cells decode to the packed fill run through the same
         // arithmetic, so take the maximum to reach a real measurement.
-        let warmest = rust_values.iter().copied().fold(f64::MIN, f64::max);
+        let warmest = values.iter().copied().fold(f64::MIN, f64::max);
         assert!(
             (200.0..400.0).contains(&warmest),
             "decoded SST must be a kelvin value, got {warmest}"
@@ -409,8 +255,8 @@ mod tests {
     /// A `units` attribute in the CF time form decodes to a timestamp.
     #[tokio::test]
     async fn cf_time_decodes_to_a_timestamp() {
-        let any = open(GRIDDED_FILE).await;
-        let array = any.get_array("time").unwrap();
+        let file = open(GRIDDED_FILE).await;
+        let array = array(&file, "time");
         assert_eq!(array.datatype(), NdArrayDataType::Timestamp);
 
         let typed = array
@@ -425,39 +271,11 @@ mod tests {
     /// and the length axis stays out of the shape.
     #[tokio::test]
     async fn fixed_size_char_variable_decodes_as_strings() {
-        let any = open(WOD_FILE).await;
+        let file = open(WOD_FILE).await;
 
         // `country` is `char country(casts, strnlen)` in the file.
-        let array = any.get_array("country").unwrap();
+        let array = array(&file, "country");
         assert_eq!(array.datatype(), NdArrayDataType::String);
         assert_eq!(array.dimensions(), vec!["casts".to_string()]);
-    }
-
-    // ── Attributes ─────────────────────────────────────────────────────
-
-    #[tokio::test]
-    async fn a_global_attribute_gets_a_leading_dot() {
-        let any = open(WOD_FILE).await;
-        assert!(any.get_array(".Conventions").is_some());
-        assert!(any.get_array("Conventions").is_none());
-    }
-
-    #[tokio::test]
-    async fn a_variable_attribute_gets_a_dotted_name() {
-        let any = open(GRIDDED_FILE).await;
-        assert!(any.get_array("analysed_sst.units").is_some());
-    }
-
-    #[tokio::test]
-    async fn array_names_are_sorted() {
-        let file = Arc::new(
-            AsyncNetcdfFile::open_store(test_store(), Path::from(WOD_FILE))
-                .await
-                .unwrap(),
-        );
-        let keys: Vec<String> = read_arrays(&file).unwrap().keys().cloned().collect();
-        let mut sorted = keys.clone();
-        sorted.sort();
-        assert_eq!(keys, sorted);
     }
 }

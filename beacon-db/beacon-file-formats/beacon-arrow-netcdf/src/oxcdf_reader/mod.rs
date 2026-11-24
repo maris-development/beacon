@@ -13,13 +13,13 @@
 //!
 //! * [`backend`] holds the lazy array backends that read variable data.
 //! * [`compat`] turns one variable or attribute into an ND array.
-//! * [`reader`] opens a file and assembles the dataset.
+//! * [`reader`] opens a file.
 
 /// Lazy array backends that read variable data through [`oxcdf`].
 pub mod backend;
 /// Conversion from [`oxcdf`] variables and attributes to ND arrays.
 pub mod compat;
-/// High-level reader that opens an object and returns a dataset.
+/// Opens a NetCDF object through `object_store`.
 pub mod reader;
 
-pub use reader::{open_dataset, open_file, open_object, read_arrays};
+pub use reader::open_file;
