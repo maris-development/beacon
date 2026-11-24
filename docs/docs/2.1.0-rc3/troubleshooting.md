@@ -68,11 +68,15 @@ SELECT DISTINCT "time.units" FROM read_netcdf('cruises/*.nc');
 
 ### The read fails on the calendar
 
-Beacon supports the Gregorian and Julian calendars only. A file with `noleap`, `365_day`,
-`360_day`, `all_leap` or `366_day` is rejected rather than decoded to a wrong instant.
+For NetCDF and HDF5, Beacon supports the Gregorian and Julian calendars only. A NetCDF or HDF5 file
+with `noleap`, `365_day`, `360_day`, `all_leap` or `366_day` is rejected rather than decoded to a
+wrong instant.
 
 Convert the time axis before you query. See
 [Supported calendars](/docs/2.1.0-rc3/cf-decoding#supported-calendars).
+
+A Zarr variable with a different calendar is not rejected. It reads as numbers. See
+[CF decode](/docs/2.1.0-rc3/formats/zarr#cf-decode).
 
 ### Values look like small integers, not physical units
 
@@ -87,12 +91,15 @@ See [CF decoding](/docs/2.1.0-rc3/cf-decoding).
 
 ### Missing data shows as `-999`, not `NULL`
 
-The file uses `missing_value` rather than `_FillValue`. Beacon nulls `_FillValue` only. Filter in
-SQL:
+The file uses `missing_value` rather than `_FillValue`. For NetCDF and HDF5, Beacon nulls
+`_FillValue` only. Filter in SQL:
 
 ```sql
 SELECT * FROM read_netcdf('old/*.nc') WHERE sst != -999.0;
 ```
+
+A Zarr store also gives nulls for `missing_value`, `valid_min`, `valid_max` and `valid_range`. See
+[CF decode](/docs/2.1.0-rc3/formats/zarr#cf-decode).
 
 ### `read_schema(...)` is not a function
 

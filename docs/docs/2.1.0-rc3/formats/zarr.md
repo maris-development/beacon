@@ -154,6 +154,12 @@ Drop each such table and create it again. The table then gets the new types. If 
 schema of the table, [`REFRESH`](/docs/2.1.0-rc3/sql/create-external-table#refresh) also gives the
 new types.
 
+A table with `'use_statistics_pruning' 'true'` also keeps its old
+[file statistics](/docs/2.1.0-rc3/internals/file-statistics). An earlier Beacon version cut a CF
+time to whole nanoseconds. This version rounds a CF time to the nearest microsecond. An old maximum can
+therefore be below the value that a query now reads. The query then prunes a store that holds a
+match. Drop the table and create it again. `DROP TABLE` deletes the statistics of the table.
+
 ## As an external table
 
 A Zarr table must point at a `zarr.json` entry file, not at a folder:
