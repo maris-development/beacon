@@ -3,8 +3,11 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use arrow::array::{ArrayRef, Float64Array};
-use arrow::datatypes::{DataType, Field, Schema};
+use arrow::array::{ArrayRef, AsArray, Float64Array};
+use arrow::datatypes::{
+    DataType, Field, Float32Type, Float64Type, Int16Type, Int32Type, Int64Type, Int8Type, Schema,
+    UInt16Type, UInt32Type, UInt64Type, UInt8Type,
+};
 use arrow::record_batch::RecordBatch;
 use beacon_datafusion_ext::fast_object::FastObjectTable;
 use beacon_datafusion_ext::listing_factory::ListingFactory;
@@ -13,6 +16,7 @@ use datafusion::datasource::listing::ListingTableUrl;
 use datafusion::execution::session_state::SessionStateBuilder;
 use datafusion::prelude::{SessionConfig, SessionContext};
 use object_store::{local::LocalFileSystem, ObjectMeta, ObjectStore, ObjectStoreExt};
+use oxcdf::{AttributeValue, DType, Extent, Extents};
 
 use super::options::NetcdfOptions;
 use super::NetcdfFormat;
@@ -63,6 +67,143 @@ pub(crate) fn write_netcdf(path: &Path, columns: Vec<(String, Vec<f64>)>) {
         ArrowRecordBatchWriter::<DefaultEncoder>::new(path, schema).expect("a netCDF writer");
     writer.write_record_batch(batch).expect("write the batch");
     writer.finish().expect("finish the file");
+}
+
+/// One variable for [`write_cf_netcdf`].
+///
+/// A binary `values` array makes a `char` variable that holds its bytes in order.
+pub(crate) struct TestVariable {
+    pub name: &'static str,
+    pub dimensions: Vec<&'static str>,
+    pub values: ArrayRef,
+    pub attributes: Vec<(&'static str, AttributeValue)>,
+}
+
+/// Write `variables` to a new NetCDF file at `path`, with the `oxcdf` writer.
+///
+/// A dimension size of `None` marks an unlimited dimension. Its length for a
+/// variable is the value count over the product of the other sizes. A
+/// `_FillValue` attribute becomes the fill value of the variable.
+pub(crate) fn write_cf_netcdf(
+    path: &Path,
+    dimensions: &[(&str, Option<usize>)],
+    variables: Vec<TestVariable>,
+) {
+    let mut file = oxcdf::create(path).expect("create the file");
+    for (name, size) in dimensions {
+        match size {
+            Some(size) => file.add_dimension(name, *size),
+            None => file.add_unlimited_dimension(name),
+        }
+        .expect("add the dimension");
+    }
+    for variable in variables {
+        let values = variable.values.as_ref();
+        let bytes: Option<Vec<u8>> = match values.data_type() {
+            DataType::Binary => Some(
+                values
+                    .as_binary::<i32>()
+                    .iter()
+                    .flatten()
+                    .flatten()
+                    .copied()
+                    .collect(),
+            ),
+            DataType::FixedSizeBinary(_) => Some(
+                values
+                    .as_fixed_size_binary()
+                    .iter()
+                    .flatten()
+                    .flatten()
+                    .copied()
+                    .collect(),
+            ),
+            _ => None,
+        };
+        let dtype = match values.data_type() {
+            DataType::Binary | DataType::FixedSizeBinary(_) => DType::Char,
+            DataType::Utf8 => DType::String,
+            DataType::Int8 => DType::Int(1),
+            DataType::Int16 => DType::Int(2),
+            DataType::Int32 => DType::Int(4),
+            DataType::Int64 => DType::Int(8),
+            DataType::UInt8 => DType::Uint(1),
+            DataType::UInt16 => DType::Uint(2),
+            DataType::UInt32 => DType::Uint(4),
+            DataType::UInt64 => DType::Uint(8),
+            DataType::Float32 => DType::Float(4),
+            DataType::Float64 => DType::Float(8),
+            other => panic!("no NetCDF type for {other}"),
+        };
+        let count = bytes.as_ref().map_or(values.len(), Vec::len);
+        let fixed: usize = variable
+            .dimensions
+            .iter()
+            .filter_map(|name| dimension_size(dimensions, name))
+            .product();
+        let extents: Vec<Extent> = variable
+            .dimensions
+            .iter()
+            .map(|name| Extent::SliceCount {
+                start: 0,
+                count: dimension_size(dimensions, name).unwrap_or(count / fixed),
+                stride: 1,
+            })
+            .collect();
+        let extents = Extents::Extent(extents);
+
+        let mut writer = file
+            .add_variable_with_type(variable.name, &variable.dimensions, &dtype)
+            .expect("add the variable");
+        for (name, value) in variable.attributes {
+            if name == "_FillValue" {
+                match value {
+                    AttributeValue::Str(fill) => writer.set_fill_value(fill.as_bytes()[0]),
+                    other => writer.set_fill_value(other.as_f64().expect("a numeric fill")),
+                }
+                .expect("set the fill value");
+            } else {
+                writer
+                    .put_attribute(name, value)
+                    .expect("put the attribute");
+            }
+        }
+
+        macro_rules! put {
+            ($($arrow:ty => $data:pat),*) => {
+                match values.data_type() {
+                    $($data => writer.put_values(values.as_primitive::<$arrow>().values(), extents),)*
+                    DataType::Utf8 => {
+                        let strings: Vec<&str> = values.as_string::<i32>().iter().map(|v| v.unwrap_or("")).collect();
+                        writer.put_strings(&strings, extents)
+                    }
+                    _ => writer.put_values(bytes.as_deref().expect("char bytes"), extents),
+                }
+            };
+        }
+        put!(
+            Int8Type => DataType::Int8,
+            Int16Type => DataType::Int16,
+            Int32Type => DataType::Int32,
+            Int64Type => DataType::Int64,
+            UInt8Type => DataType::UInt8,
+            UInt16Type => DataType::UInt16,
+            UInt32Type => DataType::UInt32,
+            UInt64Type => DataType::UInt64,
+            Float32Type => DataType::Float32,
+            Float64Type => DataType::Float64
+        )
+        .expect("write the values");
+    }
+    file.close().expect("close the file");
+}
+
+/// The size of a fixed dimension. `None` for an unlimited dimension.
+fn dimension_size(dimensions: &[(&str, Option<usize>)], name: &str) -> Option<usize> {
+    dimensions
+        .iter()
+        .find(|(dimension, _)| *dimension == name)
+        .and_then(|(_, size)| *size)
 }
 
 /// Write one small regular file: column `V0` holds `0.0, 1.0, ..` for `rows` rows.

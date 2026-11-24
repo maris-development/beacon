@@ -17,7 +17,7 @@ pub mod sink;
 pub mod statistics;
 pub mod table_function;
 #[cfg(test)]
-mod test_util;
+pub(crate) mod test_util;
 
 pub use factory::{NetCDFFormatFactory, NetcdfConfig};
 pub use format::NetcdfFormat;
