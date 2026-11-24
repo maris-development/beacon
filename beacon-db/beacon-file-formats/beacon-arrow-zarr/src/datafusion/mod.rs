@@ -33,16 +33,20 @@ use zarrs::group::Group;
 use crate::{
     config::ZarrConfig,
     reader::schema_from_group_path,
-    util::{ZarrPath, ZarrStorage, is_zarr_v3_metadata, leaf_group_keys, top_level_zarr_meta_v3},
+    util::{
+        NOMINAL_GROUP_SIZE, ZarrPath, ZarrStorage, is_zarr_v3_metadata, leaf_group_keys,
+        top_level_zarr_meta_v3,
+    },
     writer::ZarrWriteOptions,
 };
 
+pub mod opener;
 pub mod sink;
 pub mod source;
 pub mod statistics;
 
+pub use opener::{ZarrOpener, zarr_source};
 pub use sink::ZarrSink;
-use source::NOMINAL_GROUP_SIZE;
 pub use source::ZarrSource;
 
 /// Parse a boolean value supplied through a `CREATE EXTERNAL TABLE` option.

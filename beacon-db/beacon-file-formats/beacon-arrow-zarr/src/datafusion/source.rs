@@ -40,19 +40,6 @@ use crate::{
     util::{ZarrPath, ZarrStorage},
 };
 
-/// The nominal size a zarr leaf group reports.
-///
-/// A leaf group is not one object. It is a node with a `zarr.json` and a tree of
-/// chunk files under it, so no byte count describes it, which is why it used to
-/// report zero. Zero has a cost: DataFusion divides a file by byte range, and it
-/// declines to divide a range of zero, so a group could never be split.
-///
-/// The value carries no meaning of its own. It only has to leave room for one
-/// range per partition. [`ZarrOpener`] reads its range as a fraction of the
-/// chunk list and never as bytes, so the fractions come out exact whatever this
-/// is. See [`beacon_nd_array::arrow::split`].
-pub(crate) const NOMINAL_GROUP_SIZE: u64 = 1 << 20;
-
 /// DataFusion [`FileSource`] for zarr groups.
 #[derive(Clone)]
 pub struct ZarrSource {
