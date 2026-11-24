@@ -1,7 +1,8 @@
 //! In-memory Zarr stores for the tests of the ND framework module.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
+use object_store::ObjectStore;
 use object_store::memory::InMemory;
 use serde_json::{Map, Value};
 use zarrs::array::builder::ArrayBuilderFillValue;
@@ -12,12 +13,32 @@ use zarrs_object_store::AsyncObjectStore;
 use super::ZarrArray;
 use crate::util::ZarrStorage;
 
-type MemoryStore = AsyncObjectStore<InMemory>;
+/// A writable in-memory Zarr store for tests.
+pub(crate) struct TestStore {
+    zarr: Arc<AsyncObjectStore<Arc<InMemory>>>,
+    memory: Arc<InMemory>,
+}
 
-/// The writable side of each store of [`memory_storage`].
-///
-/// A `ZarrStorage` only reads, so the helpers find the writer by the address of the store.
-static STORES: Mutex<Vec<Arc<MemoryStore>>> = Mutex::new(Vec::new());
+impl TestStore {
+    /// An empty store.
+    pub(crate) fn new() -> Self {
+        let memory = Arc::new(InMemory::new());
+        let zarr = Arc::new(AsyncObjectStore::new(memory.clone()));
+        Self { zarr, memory }
+    }
+
+    /// The read storage that the reader takes.
+    pub(crate) fn storage(&self) -> ZarrStorage {
+        ZarrStorage::new(self.zarr.clone())
+    }
+
+    /// The object store under the Zarr store, for a DataFusion session or an opener.
+    // The opener tests of a later change use this method.
+    #[allow(dead_code)]
+    pub(crate) fn object_store(&self) -> Arc<dyn ObjectStore> {
+        self.memory.clone()
+    }
+}
 
 /// A Rust type that the helpers write as a Zarr data type.
 pub(crate) trait TestElement: Element + Send + Sync + 'static {
@@ -54,20 +75,13 @@ test_element!(f64, float64, 0.0f64);
 test_element!(String, string, "");
 test_element!(Vec<u8>, bytes, Vec::<u8>::new());
 
-/// An empty in-memory Zarr store (`AsyncObjectStore` over `object_store::memory::InMemory`).
-pub(crate) fn memory_storage() -> ZarrStorage {
-    let store = Arc::new(AsyncObjectStore::new(InMemory::new()));
-    STORES.lock().unwrap().push(store.clone());
-    ZarrStorage::new(store)
-}
-
 /// Write one group node with `attributes` at `path`.
 // The group tests of a later change use this helper.
 #[allow(dead_code)]
-pub(crate) async fn write_group(storage: &ZarrStorage, path: &str, attributes: Value) {
+pub(crate) async fn write_group(store: &TestStore, path: &str, attributes: Value) {
     GroupBuilder::new()
         .attributes(object(attributes))
-        .build(writer(storage), path)
+        .build(store.zarr.clone(), path)
         .unwrap()
         .async_store_metadata()
         .await
@@ -76,7 +90,7 @@ pub(crate) async fn write_group(storage: &ZarrStorage, path: &str, attributes: V
 
 /// Write one array with its values. `dims` gives a name or `None` for each axis.
 pub(crate) async fn write_array<T: TestElement>(
-    storage: &ZarrStorage,
+    store: &TestStore,
     path: &str,
     shape: &[u64],
     chunks: &[u64],
@@ -92,26 +106,18 @@ pub(crate) async fn write_array<T: TestElement>(
     )
     .dimension_names(Some(dims.iter().copied()))
     .attributes(object(attributes))
-    .build(writer(storage), path)
+    .build(store.zarr.clone(), path)
     .unwrap();
     array.async_store_metadata().await.unwrap();
     array
         .async_store_array_subset(&ArraySubset::new_with_shape(shape.to_vec()), values)
         .await
         .unwrap();
-    Arc::new(ZarrArray::async_open(storage.inner(), path).await.unwrap())
-}
-
-/// The writable store behind `storage`.
-fn writer(storage: &ZarrStorage) -> Arc<MemoryStore> {
-    let inner = storage.inner();
-    STORES
-        .lock()
-        .unwrap()
-        .iter()
-        .find(|store| std::ptr::addr_eq(Arc::as_ptr(store), Arc::as_ptr(&inner)))
-        .cloned()
-        .expect("the storage comes from memory_storage")
+    Arc::new(
+        ZarrArray::async_open(store.storage().inner(), path)
+            .await
+            .unwrap(),
+    )
 }
 
 /// The JSON object of `value`.

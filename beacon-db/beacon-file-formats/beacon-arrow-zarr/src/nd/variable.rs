@@ -278,7 +278,7 @@ mod tests {
     use zarrs::array::{ArrayBuilder, FillValue, data_type};
 
     use super::*;
-    use crate::nd::testing::{TestElement, memory_storage, write_array};
+    use crate::nd::testing::{TestElement, TestStore, write_array};
 
     /// A variable "v" with the axes "d0", "d1", .. over one written array.
     async fn variable<T: TestElement>(
@@ -289,8 +289,8 @@ mod tests {
     ) -> ZarrVariable {
         let names: Vec<String> = (0..shape.len()).map(|axis| format!("d{axis}")).collect();
         let dims: Vec<Option<&str>> = names.iter().map(|name| Some(name.as_str())).collect();
-        let storage = memory_storage();
-        let array = write_array(&storage, "/v", shape, chunks, &dims, attributes, values).await;
+        let store = TestStore::new();
+        let array = write_array(&store, "/v", shape, chunks, &dims, attributes, values).await;
         let dimensions = Dimensions::try_new(
             names
                 .iter()
@@ -502,7 +502,7 @@ mod tests {
             data_type::complex64(),
             FillValue::from([0u8; 8]),
         )
-        .build(memory_storage().inner(), "/c")
+        .build(TestStore::new().storage().inner(), "/c")
         .unwrap();
         let dimensions = Dimensions::try_new([Dimension::new("d0", 2)]).unwrap();
         let reason = ZarrVariable::try_new(Arc::new(array), "c", dimensions).unwrap_err();
