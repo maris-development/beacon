@@ -13,10 +13,8 @@ use zarrs_storage::AsyncReadableListableStorageTraits;
 use attributes::attributes_of;
 use variable::ZarrVariable;
 
-mod attributes;
-// The statistics of a later change use the time bounds of this module.
-#[allow(dead_code)]
-mod decode;
+pub(crate) mod attributes;
+pub(crate) mod decode;
 #[cfg(test)]
 pub(crate) mod testing;
 mod variable;

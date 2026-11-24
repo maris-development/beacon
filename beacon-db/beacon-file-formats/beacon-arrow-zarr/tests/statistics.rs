@@ -403,7 +403,7 @@ async fn infer_stats_bounds_the_bundled_store() {
     assert!(
         matches!(
             time.min_value.get_value(),
-            Some(ScalarValue::TimestampNanosecond(Some(_), _))
+            Some(ScalarValue::TimestampMicrosecond(Some(_), _))
         ),
         "time must carry a timestamp range, got {time:?}"
     );
