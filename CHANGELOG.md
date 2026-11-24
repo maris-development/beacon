@@ -71,8 +71,6 @@ released from a single `v*` tag. Releases before 2.0.0 are recorded in the
     `m(x, x)` with a repeated dimension. Beacon then also leaves out `m.units`.
   - With `read_dimensions` and `skip_unbroadcastable`, Beacon skips a ragged NetCDF file with a
     warning. It does not refuse the file.
-  - A NetCDF-4 file that you read with `STORED AS HDF5` keeps the HDF5 decode: nanosecond time,
-    `Float64` packing, and no `missing_value`. `STORED AS NC` uses the NetCDF rules.
 
   A stored table keeps its stored column types. Refresh each NetCDF table with a packed time
   column: use `REFRESH`, or drop the table and create it again. Else a stored `Float64` column gets
@@ -84,6 +82,21 @@ released from a single `v*` tag. Releases before 2.0.0 are recorded in the
 
   **Breaking:** A TIFF table does not support `PARTITIONED BY` now. A query on a stored partitioned
   TIFF table gives an error. Drop the table and create it again without `PARTITIONED BY`.
+
+- **HDF5 reads through the ND framework.** The HDF5 scan runs on the ND framework, and HDF5 uses the
+  NetCDF CF decode. The column names do not change: nested groups, compound members, group
+  attributes and the OptoDAS convention read as before. Some column types and values change:
+  - A CF time variable is `Timestamp(Microsecond)`, not `Timestamp(Nanosecond)`. The OptoDAS
+    `time` column stays `Timestamp(Nanosecond)`.
+  - Packed values get the float type of `scale_factor` or `add_offset`, for example `Float32`.
+  - `missing_value`, `valid_min`, `valid_max` and `valid_range` turn values into nulls.
+  - An attribute with more than one value gives no column.
+  - `COUNT(*)` gives an error. Use `COUNT(column)`.
+
+  **Breaking:** An HDF5 table does not support `PARTITIONED BY` now. A query on a stored
+  partitioned HDF5 table gives an error. Drop the table and create it again without
+  `PARTITIONED BY`. Refresh each HDF5 table with a CF time column: use `REFRESH`, or drop the
+  table and create it again.
 
 - **The server owns users and roles.** The engine has no users, no roles and no identity. The server
   checks each request, and it gives the engine the access rules of the caller. The server keeps
