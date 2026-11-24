@@ -4,15 +4,17 @@ use std::sync::Arc;
 
 use arrow::array::{ArrayRef, Float64Array, StringArray, UInt16Array, UInt32Array, UInt64Array};
 use async_tiff::ImageFileDirectory;
-use async_tiff::reader::Endianness;
 use async_tiff::tags::SampleFormat;
 use beacon_nd_dataset::{
     DatasetSchema, Dimension, Dimensions, Error, MemoryVariable, NdArrowArray, NdVariable, Result,
 };
 
 use super::variable::TiffBand;
+use super::{DIM_X, DIM_Y, GEO_LAT, GEO_LON};
 use crate::block::{BlockLayout, TiffImage, TiffSample};
-use crate::reader::{ObjectStoreAsyncReader, coordinates, format_f64_list};
+use crate::reader::{ObjectStoreAsyncReader, coordinates, format_f64_list, nodata_text};
+
+type Variables = Vec<Arc<dyn NdVariable>>;
 
 /// The dataset of the image `ifd`: the bands, the coordinates and the tags, sorted by name.
 ///
@@ -21,113 +23,115 @@ use crate::reader::{ObjectStoreAsyncReader, coordinates, format_f64_list};
 pub(crate) fn dataset_of(
     name: &str,
     ifd: &ImageFileDirectory,
-    endianness: Endianness,
+    layout: BlockLayout,
     reader: ObjectStoreAsyncReader,
 ) -> Result<DatasetSchema> {
-    let layout = BlockLayout::from_ifd(ifd, endianness)
-        .map_err(|e| Error::format(anyhow::anyhow!("Failed to read TIFF block layout: {e:#}")))?;
-    let (height, width) = (layout.image_height, layout.image_width);
+    let dimensions = Dimensions::try_new([
+        Dimension::new(DIM_Y, layout.image_height),
+        Dimension::new(DIM_X, layout.image_width),
+    ])?;
 
-    let mut variables: Vec<Arc<dyn NdVariable>> = Vec::new();
-    let mut scalar = |name: &str, value: ArrayRef| -> Result<()> {
-        let array = NdArrowArray::try_new_scalar(value)?;
-        variables.push(Arc::new(MemoryVariable::new(name, array)));
-        Ok(())
-    };
-    let utf8 = |text: String| Arc::new(StringArray::from(vec![text])) as ArrayRef;
-
-    scalar(
-        "image.width",
-        Arc::new(UInt32Array::from(vec![ifd.image_width()])),
-    )?;
-    scalar(
-        "image.height",
-        Arc::new(UInt32Array::from(vec![ifd.image_height()])),
-    )?;
-    scalar(
-        "image.samples_per_pixel",
-        Arc::new(UInt16Array::from(vec![ifd.samples_per_pixel()])),
-    )?;
-    if let Some(&bits) = ifd.bits_per_sample().first() {
-        scalar(
-            "image.bits_per_sample",
-            Arc::new(UInt16Array::from(vec![bits])),
-        )?;
-    }
-    if layout.tiled {
-        scalar(
-            "image.tile_width",
-            Arc::new(UInt32Array::from(vec![layout.block_width as u32])),
-        )?;
-        scalar(
-            "image.tile_height",
-            Arc::new(UInt32Array::from(vec![layout.block_height as u32])),
-        )?;
-        scalar(
-            "image.tile_count_x",
-            Arc::new(UInt64Array::from(vec![layout.blocks_across as u64])),
-        )?;
-        scalar(
-            "image.tile_count_y",
-            Arc::new(UInt64Array::from(vec![layout.blocks_down as u64])),
-        )?;
-    }
-    if let Some(epsg) = ifd.geo_key_directory().and_then(|keys| keys.epsg_code()) {
-        scalar("geo.epsg", Arc::new(UInt16Array::from(vec![epsg])))?;
-        scalar("geo.crs", utf8(format!("EPSG:{epsg}")))?;
-    }
-    if let Some(values) = ifd.model_pixel_scale() {
-        scalar("geo.model_pixel_scale", utf8(format_f64_list(values)))?;
-    }
-    if let Some(values) = ifd.model_tiepoint() {
-        scalar("geo.model_tiepoint", utf8(format_f64_list(values)))?;
-    }
-    if let Some(values) = ifd.model_transformation() {
-        scalar("geo.model_transformation", utf8(format_f64_list(values)))?;
-    }
-
-    // GDAL ends the tag with a NUL byte, and some writers add spaces.
-    let nodata = ifd
-        .gdal_nodata()
-        .map(|s| s.trim_matches(|c: char| c == '\0' || c.is_whitespace()))
-        .filter(|s| !s.is_empty());
-    if let Some(nodata) = nodata {
-        scalar("geo.nodata", utf8(nodata.to_string()))?;
-    }
-    if let Some(metadata) = ifd.gdal_metadata() {
-        scalar("geo.gdal_metadata", utf8(metadata.to_string()))?;
-    }
-
-    if let Some((lons, lats)) = coordinates(ifd) {
-        let axis = |name: &str, dimension: &str, values: Vec<f64>| -> Result<Arc<dyn NdVariable>> {
-            let dimensions = Dimensions::try_new([Dimension::new(dimension, values.len())])?;
-            let values = Arc::new(Float64Array::from(values)) as ArrayRef;
-            let array = NdArrowArray::try_new(values, dimensions)?;
-            Ok(Arc::new(MemoryVariable::new(name, array)))
-        };
-        variables.push(axis("geo.lat", "y", lats)?);
-        variables.push(axis("geo.lon", "x", lons)?);
-    }
-
-    variables.extend(bands(layout, reader, nodata).map_err(Error::format)?);
+    let mut variables = tag_variables(ifd, &layout)?;
+    variables.extend(coordinate_variables(ifd)?);
+    variables.extend(band_variables(layout, reader, nodata_text(ifd)).map_err(Error::format)?);
     variables.sort_by(|a, b| a.name().cmp(b.name()));
 
-    let dimensions =
-        Dimensions::try_new([Dimension::new("y", height), Dimension::new("x", width)])?;
     DatasetSchema::try_new(name, dimensions, variables)
 }
 
+/// A rank-0 variable with the one value of `value`.
+fn scalar(name: &str, value: ArrayRef) -> Result<Arc<dyn NdVariable>> {
+    let array = NdArrowArray::try_new_scalar(value)?;
+    Ok(Arc::new(MemoryVariable::new(name, array)))
+}
+
+fn u16_tag(name: &str, value: u16) -> Result<Arc<dyn NdVariable>> {
+    scalar(name, Arc::new(UInt16Array::from(vec![value])))
+}
+
+fn u32_tag(name: &str, value: u32) -> Result<Arc<dyn NdVariable>> {
+    scalar(name, Arc::new(UInt32Array::from(vec![value])))
+}
+
+fn u64_tag(name: &str, value: u64) -> Result<Arc<dyn NdVariable>> {
+    scalar(name, Arc::new(UInt64Array::from(vec![value])))
+}
+
+fn utf8_tag(name: &str, value: impl Into<String>) -> Result<Arc<dyn NdVariable>> {
+    scalar(name, Arc::new(StringArray::from(vec![value.into()])))
+}
+
+/// The `image.*` and `geo.*` tag variables. A tag that the file lacks gives no variable.
+fn tag_variables(ifd: &ImageFileDirectory, layout: &BlockLayout) -> Result<Variables> {
+    let mut tags = vec![
+        u32_tag("image.width", ifd.image_width())?,
+        u32_tag("image.height", ifd.image_height())?,
+        u16_tag("image.samples_per_pixel", ifd.samples_per_pixel())?,
+    ];
+    if let Some(&bits) = ifd.bits_per_sample().first() {
+        tags.push(u16_tag("image.bits_per_sample", bits)?);
+    }
+    if layout.tiled {
+        tags.push(u32_tag("image.tile_width", layout.block_width as u32)?);
+        tags.push(u32_tag("image.tile_height", layout.block_height as u32)?);
+        tags.push(u64_tag("image.tile_count_x", layout.blocks_across as u64)?);
+        tags.push(u64_tag("image.tile_count_y", layout.blocks_down as u64)?);
+    }
+    if let Some(epsg) = ifd.geo_key_directory().and_then(|keys| keys.epsg_code()) {
+        tags.push(u16_tag("geo.epsg", epsg)?);
+        tags.push(utf8_tag("geo.crs", format!("EPSG:{epsg}"))?);
+    }
+    if let Some(values) = ifd.model_pixel_scale() {
+        tags.push(utf8_tag("geo.model_pixel_scale", format_f64_list(values))?);
+    }
+    if let Some(values) = ifd.model_tiepoint() {
+        tags.push(utf8_tag("geo.model_tiepoint", format_f64_list(values))?);
+    }
+    if let Some(values) = ifd.model_transformation() {
+        tags.push(utf8_tag(
+            "geo.model_transformation",
+            format_f64_list(values),
+        )?);
+    }
+    if let Some(nodata) = nodata_text(ifd) {
+        tags.push(utf8_tag("geo.nodata", nodata)?);
+    }
+    if let Some(metadata) = ifd.gdal_metadata() {
+        tags.push(utf8_tag("geo.gdal_metadata", metadata)?);
+    }
+    Ok(tags)
+}
+
+/// `geo.lat` on `y` and `geo.lon` on `x`. Empty when the file has no usable geolocation.
+fn coordinate_variables(ifd: &ImageFileDirectory) -> Result<Variables> {
+    fn axis(name: &str, dimension: &str, values: Vec<f64>) -> Result<Arc<dyn NdVariable>> {
+        let dimensions = Dimensions::try_new([Dimension::new(dimension, values.len())])?;
+        let array = NdArrowArray::try_new(Arc::new(Float64Array::from(values)), dimensions)?;
+        Ok(Arc::new(MemoryVariable::new(name, array)))
+    }
+
+    let Some((lons, lats)) = coordinates(ifd) else {
+        return Ok(Vec::new());
+    };
+    Ok(vec![
+        axis(GEO_LAT, DIM_Y, lats)?,
+        axis(GEO_LON, DIM_X, lons)?,
+    ])
+}
+
 /// One band variable per sample of the image. No pixel data is fetched here.
-fn bands(
+///
+/// The arms agree with the `TiffSample` implementations in `block.rs`.
+fn band_variables(
     layout: BlockLayout,
     reader: ObjectStoreAsyncReader,
     nodata: Option<&str>,
-) -> anyhow::Result<Vec<Arc<dyn NdVariable>>> {
+) -> anyhow::Result<Variables> {
     fn make<T: TiffSample>(
         layout: BlockLayout,
         reader: ObjectStoreAsyncReader,
         nodata: Option<&str>,
-    ) -> anyhow::Result<Vec<Arc<dyn NdVariable>>> {
+    ) -> anyhow::Result<Variables> {
         let nodata = nodata.and_then(|text| {
             let value = T::parse_nodata(text);
             if value.is_none() {

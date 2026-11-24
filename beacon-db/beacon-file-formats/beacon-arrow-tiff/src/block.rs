@@ -17,8 +17,12 @@ use async_tiff::tags::{
     Compression, PhotometricInterpretation, PlanarConfiguration, Predictor, SampleFormat,
 };
 use bytes::Bytes;
+use futures::StreamExt;
 
 use crate::reader::ObjectStoreAsyncReader;
+
+/// The maximum number of blocks that one window read fetches at the same time.
+const MAX_CONCURRENT_BLOCKS: usize = 16;
 
 /// The approximate pixel count of one read chunk of a stripped image.
 const TARGET_STRIP_CHUNK_PIXELS: usize = 256 * 256;
@@ -551,6 +555,58 @@ impl<T: TiffSample> TiffImage<T> {
             .await
             .map(Some)
             .map_err(|e| anyhow::anyhow!("Failed to read {}: {e:#}", context()))
+    }
+
+    /// The samples of `band` in the window `rows` x `cols`, row by row.
+    ///
+    /// Fetches only the blocks that intersect the window. A pixel of a sparse block gets `fill`.
+    /// The window must lie inside the image.
+    pub(crate) async fn read_window(
+        &self,
+        band: usize,
+        rows: Range<usize>,
+        cols: Range<usize>,
+        fill: T,
+    ) -> anyhow::Result<Vec<T>> {
+        let layout = &self.layout;
+        let (n_rows, n_cols) = (rows.len(), cols.len());
+        let mut result = vec![fill; n_rows * n_cols];
+        if n_rows == 0 || n_cols == 0 {
+            return Ok(result);
+        }
+
+        let (bw, bh) = (layout.block_width, layout.block_height);
+        let block_rows = rows.start / bh..=(rows.end - 1) / bh;
+        let block_cols = cols.start / bw..=(cols.end - 1) / bw;
+        let coords: Vec<(usize, usize)> = block_rows
+            .flat_map(|by| block_cols.clone().map(move |bx| (bx, by)))
+            .collect();
+        let mut blocks = futures::stream::iter(coords)
+            .map(|(bx, by)| async move { (bx, by, self.block(band, bx, by).await) })
+            .buffer_unordered(MAX_CONCURRENT_BLOCKS);
+
+        // A block of a pixel-interleaved image holds every band of each pixel.
+        let samples = layout.block_samples();
+        let sample = if layout.planar { 0 } else { band };
+
+        while let Some((bx, by, block)) = blocks.next().await {
+            // `None` is a sparse block. Its pixels keep the fill.
+            let Some(block) = block? else { continue };
+            let rows_in_block = block.len() / (bw * samples);
+
+            let row_end = rows.end.min(by * bh + rows_in_block);
+            let col_first = cols.start.max(bx * bw);
+            let col_end = cols.end.min((bx + 1) * bw);
+            for row in rows.start.max(by * bh)..row_end {
+                let src_row = (row - by * bh) * bw;
+                let dst_row = (row - rows.start) * n_cols;
+                for col in col_first..col_end {
+                    let src = (src_row + col - bx * bw) * samples + sample;
+                    result[dst_row + col - cols.start] = block[src];
+                }
+            }
+        }
+        Ok(result)
     }
 }
 

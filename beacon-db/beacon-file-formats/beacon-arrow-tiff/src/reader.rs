@@ -1,4 +1,4 @@
-//! TIFF metadata: the object store reader, the image IFD and the pixel coordinates.
+//! TIFF metadata: the object store reader, the image IFD, its layout and the pixel coordinates.
 
 use std::{ops::Range, panic::AssertUnwindSafe, sync::Arc};
 
@@ -7,6 +7,8 @@ use async_tiff::metadata::{TiffMetadataReader, cache::ReadaheadMetadataCache};
 use async_tiff::reader::{AsyncFileReader, Endianness};
 use futures::FutureExt;
 use object_store::{ObjectStore, ObjectStoreExt, path::Path};
+
+use crate::block::BlockLayout;
 
 #[derive(Clone)]
 pub(crate) struct ObjectStoreAsyncReader {
@@ -134,11 +136,29 @@ fn pixel_center_offset(ifd: &ImageFileDirectory) -> f64 {
     }
 }
 
+/// The `GDAL_NODATA` text of the image. `None` when the tag is absent or empty.
+pub(crate) fn nodata_text(ifd: &ImageFileDirectory) -> Option<&str> {
+    // GDAL ends the tag with a NUL byte, and some writers add spaces.
+    ifd.gdal_nodata()
+        .map(|s| s.trim_matches(|c: char| c == '\0' || c.is_whitespace()))
+        .filter(|s| !s.is_empty())
+}
+
+/// Read the full-resolution image of the file and its block layout.
+pub(crate) async fn read_image(
+    reader: &ObjectStoreAsyncReader,
+) -> anyhow::Result<(ImageFileDirectory, BlockLayout)> {
+    let (ifd, endianness) = read_image_ifd(reader).await?;
+    let layout = BlockLayout::from_ifd(&ifd, endianness)
+        .map_err(|e| anyhow::anyhow!("Failed to read TIFF block layout: {e:#}"))?;
+    Ok((ifd, layout))
+}
+
 /// Read the IFDs and return the full-resolution image and the byte order.
 ///
 /// `async-tiff` panics on some malformed IFDs. The panic becomes an error here,
 /// so a bad file fails its query and not the whole server task.
-pub(crate) async fn read_image_ifd(
+async fn read_image_ifd(
     reader: &ObjectStoreAsyncReader,
 ) -> anyhow::Result<(ImageFileDirectory, Endianness)> {
     let cached_reader = ReadaheadMetadataCache::new(reader.clone());
