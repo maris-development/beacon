@@ -11,7 +11,8 @@ use object_store::{ObjectMeta, ObjectStore};
 use oxcdf::AsyncNetcdfFile;
 
 use super::dataset::dataset_of;
-use crate::ReadOptions;
+use crate::conventions::optodas;
+use crate::{Hdf5Convention, ReadOptions};
 
 /// Opens an HDF5 file. It reads the metadata only.
 #[derive(Debug, Clone, Copy, Default)]
@@ -55,7 +56,25 @@ impl NdFileOpener for Hdf5Opener {
         }
         phony.log_merges(&name);
 
-        let dataset = dataset_of(&name, &hdf5, &phony, Vec::new())?;
+        // The convention names its axes before any variable is built.
+        let convention = match self.read.convention {
+            Hdf5Convention::None => None,
+            Hdf5Convention::OptoDas => optodas::detect(&hdf5, &phony)
+                .await
+                .map_err(Error::format)?,
+        };
+        let (extra, scaled) = match &convention {
+            Some(convention) => {
+                phony = phony.rename(convention.axis_names());
+                (
+                    convention.coordinates()?,
+                    convention.scale().map(|scale| (optodas::PAYLOAD, scale)),
+                )
+            }
+            None => (Vec::new(), None),
+        };
+
+        let dataset = dataset_of(&name, &hdf5, &phony, extra, scaled)?;
         Ok(attribute_columns(Arc::new(dataset)))
     }
 }

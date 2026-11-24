@@ -36,15 +36,20 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use arrow::array::{Array, ArrayRef, AsArray, Float64Array, TimestampNanosecondArray};
+use arrow::compute::cast;
+use arrow::datatypes::{DataType, Float64Type, Int64Type};
 use beacon_arrow_netcdf::dimensions::PhonyDimensions;
+use beacon_arrow_netcdf::nd::{stored_length, NetcdfVariable};
 use beacon_arrow_netcdf::oxcdf_reader::compat;
 use beacon_nd_array::datatypes::TimestampNanosecond;
 use beacon_nd_array::{NdArray, NdArrayD};
+use beacon_nd_dataset::{Dimension, Dimensions, MemoryVariable, NdArrowArray, NdVariable, Region};
 use indexmap::IndexMap;
 use oxcdf::AsyncNetcdfFile;
 
 /// The payload of an OptoDAS file, which every other path is relative to.
-const PAYLOAD: &str = "data";
+pub(crate) const PAYLOAD: &str = "data";
 /// One nanosecond per second, for the epoch seconds the file records.
 const NANOS_PER_SECOND: f64 = 1_000_000_000.0;
 
@@ -242,6 +247,37 @@ impl OptoDas {
         &self.axis_names
     }
 
+    /// The scale that turns the payload counts into the unit of the file.
+    pub fn scale(&self) -> Option<f64> {
+        self.scale
+    }
+
+    /// The coordinates the file describes but does not store: `time` and `distance`.
+    ///
+    /// `time` counts in nanoseconds, so one `dt` of 8 ms stays exact to the end of a file.
+    pub fn coordinates(&self) -> beacon_nd_dataset::Result<Vec<Arc<dyn NdVariable>>> {
+        let mut coordinates: Vec<Arc<dyn NdVariable>> = Vec::new();
+        if let Some(time) = &self.time {
+            let start = (time.start * NANOS_PER_SECOND).round() as i64;
+            let step = (time.step * NANOS_PER_SECOND).round() as i64;
+            let values = TimestampNanosecondArray::from_iter_values(
+                (0..time.len).map(|sample| start + sample as i64 * step),
+            );
+            coordinates.push(coordinate(&time.dimension, time.len, Arc::new(values))?);
+        }
+        if let Some(distance) = &self.distance {
+            let values = Float64Array::from_iter_values((0..distance.len).map(|position| {
+                (distance.first + position as f64 * distance.step) * distance.scale
+            }));
+            coordinates.push(coordinate(
+                &distance.dimension,
+                distance.len,
+                Arc::new(values),
+            )?);
+        }
+        Ok(coordinates)
+    }
+
     /// Add to `arrays` what the file describes but does not store.
     ///
     /// Three things: the `time` coordinate, the `distance` coordinate, and the
@@ -332,61 +368,75 @@ fn insert_coordinate(
     arrays.insert(name.to_string(), coordinate);
 }
 
+/// One 1-D in-memory coordinate on the axis `dimension`.
+fn coordinate(
+    dimension: &str,
+    len: usize,
+    values: ArrayRef,
+) -> beacon_nd_dataset::Result<Arc<dyn NdVariable>> {
+    let dimensions = Dimensions::try_new([Dimension::new(dimension, len)])?;
+    let array = NdArrowArray::try_new(values, dimensions)?;
+    Ok(Arc::new(MemoryVariable::new(dimension, array)))
+}
+
 // ─── Reading the few values the check needs ────────────────────────────────
 
-/// One variable as a lazy array, or `None` when the file holds no such thing.
-fn array_of(file: &Arc<AsyncNetcdfFile>, path: &str) -> Option<Arc<dyn NdArrayD>> {
+/// All values of one variable, or `None` when the file holds no such thing.
+async fn read_column(file: &Arc<AsyncNetcdfFile>, path: &str) -> Option<ArrayRef> {
     let variable = file.variable(path)?;
-    compat::variable_to_nd_array(file.clone(), &variable, &PhonyDimensions::none()).ok()
+    let phony = PhonyDimensions::none();
+    let sizes: IndexMap<String, usize> = phony
+        .apply(&variable.dimensions)
+        .into_iter()
+        .zip(stored_length(&variable))
+        .collect();
+    let column = NetcdfVariable::try_new(
+        Arc::from(path),
+        Arc::from(path),
+        file.clone(),
+        &variable,
+        &phony,
+        &sizes,
+    )
+    .ok()?;
+    let read = column.read(&Region::full(column.dimensions())).await.ok()?;
+    Some(read.values().clone())
 }
 
 /// The strings of one variable.
 async fn read_strings(file: &Arc<AsyncNetcdfFile>, path: &str) -> Option<Vec<String>> {
-    let array = array_of(file, path)?;
-    let typed = array.as_any().downcast_ref::<NdArray<String>>()?;
-    Some(typed.clone_into_raw_vec().await)
+    let values = read_column(file, path).await?;
+    let strings = values.as_string_opt::<i32>()?;
+    Some(
+        strings
+            .iter()
+            .map(|value| value.unwrap_or_default().to_string())
+            .collect(),
+    )
 }
 
 /// The integers of one variable, whatever width the file wrote them at.
 async fn read_i64s(file: &Arc<AsyncNetcdfFile>, path: &str) -> Option<Vec<i64>> {
-    let array = array_of(file, path)?;
-    if let Some(typed) = array.as_any().downcast_ref::<NdArray<i64>>() {
-        return Some(typed.clone_into_raw_vec().await);
+    let values = read_column(file, path).await?;
+    if !values.data_type().is_integer() {
+        return None;
     }
-    if let Some(typed) = array.as_any().downcast_ref::<NdArray<i32>>() {
-        return Some(
-            typed
-                .clone_into_raw_vec()
-                .await
-                .into_iter()
-                .map(i64::from)
-                .collect(),
-        );
-    }
-    None
+    let values = cast(&values, &DataType::Int64).ok()?;
+    Some(values.as_primitive::<Int64Type>().values().to_vec())
 }
 
 /// The first value of one variable, as a double.
 async fn read_f64(file: &Arc<AsyncNetcdfFile>, path: &str) -> Option<f64> {
-    let array = array_of(file, path)?;
-    if let Some(typed) = array.as_any().downcast_ref::<NdArray<f64>>() {
-        return typed.clone_into_raw_vec().await.first().copied();
+    let values = read_column(file, path).await?;
+    if !(values.data_type().is_integer() || values.data_type().is_floating()) {
+        return None;
     }
-    if let Some(typed) = array.as_any().downcast_ref::<NdArray<i64>>() {
-        return typed
-            .clone_into_raw_vec()
-            .await
-            .first()
-            .map(|value| *value as f64);
-    }
-    if let Some(typed) = array.as_any().downcast_ref::<NdArray<i32>>() {
-        return typed
-            .clone_into_raw_vec()
-            .await
-            .first()
-            .map(|value| *value as f64);
-    }
-    None
+    let values = cast(&values, &DataType::Float64).ok()?;
+    values
+        .as_primitive::<Float64Type>()
+        .values()
+        .first()
+        .copied()
 }
 
 // ─── Tests ─────────────────────────────────────────────────────────────────

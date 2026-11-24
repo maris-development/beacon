@@ -158,3 +158,90 @@ async fn a_missing_object_is_an_error() {
         .is_err());
     let _ = try_open_with;
 }
+
+// ── The OptoDAS convention ─────────────────────────────────────────────────
+
+const OPTODAS_FILE: &str = "optodas.h5";
+const OPTODAS_GAP_FILE: &str = "optodas-gap.h5";
+
+fn optodas() -> ReadOptions {
+    ReadOptions {
+        convention: beacon_arrow_hdf5::Hdf5Convention::OptoDas,
+        ..ReadOptions::default()
+    }
+}
+
+#[tokio::test]
+async fn the_payload_axes_get_the_names_of_the_file() {
+    let dataset = open_with(OPTODAS_FILE, optodas()).await;
+    assert_eq!(
+        dimension_names(dataset.as_ref(), "data"),
+        ["time", "distance"]
+    );
+}
+
+#[tokio::test]
+async fn the_time_coordinate_counts_in_nanoseconds() {
+    use arrow::datatypes::{DataType, TimeUnit, TimestampNanosecondType};
+    let dataset = open_with(OPTODAS_FILE, optodas()).await;
+    let time = dataset.variable("time").expect("a time column");
+    assert_eq!(
+        time.data_type(),
+        &DataType::Timestamp(TimeUnit::Nanosecond, None)
+    );
+    assert_eq!(dimension_names(dataset.as_ref(), "time"), ["time"]);
+    // 2026-03-28T12:00:00Z, then 8 ms per sample, six of them.
+    let start = 1_774_699_200_000_000_000i64;
+    assert_eq!(
+        values::<TimestampNanosecondType>(dataset.as_ref(), "time").await,
+        (0..6)
+            .map(|step| Some(start + step * 8_000_000))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[tokio::test]
+async fn the_distance_coordinate_is_in_metres() {
+    use arrow::datatypes::Float64Type;
+    let dataset = open_with(OPTODAS_FILE, optodas()).await;
+    assert_eq!(dimension_names(dataset.as_ref(), "distance"), ["distance"]);
+    assert_eq!(
+        values::<Float64Type>(dataset.as_ref(), "distance").await,
+        [Some(0.0), Some(5.0), Some(10.0), Some(15.0)]
+    );
+}
+
+#[tokio::test]
+async fn the_payload_is_scaled() {
+    use arrow::datatypes::{DataType, Float64Type};
+    let dataset = open_with(OPTODAS_FILE, optodas()).await;
+    let data = dataset.variable("data").unwrap();
+    assert_eq!(data.data_type(), &DataType::Float64);
+    let read = values::<Float64Type>(dataset.as_ref(), "data").await;
+    assert_eq!(read[..4], [Some(0.0), Some(0.5), Some(1.0), Some(1.5)]);
+}
+
+#[tokio::test]
+async fn missing_samples_give_no_time_column() {
+    let dataset = open_with(OPTODAS_GAP_FILE, optodas()).await;
+    assert!(dataset.variable("time").is_none());
+    assert!(dataset.variable("distance").is_some());
+    assert!(dataset.variable("data").is_some());
+}
+
+#[tokio::test]
+async fn the_convention_is_off_by_default() {
+    use arrow::datatypes::DataType;
+    let dataset = open(OPTODAS_FILE).await;
+    assert!(dataset.variable("time").is_none());
+    assert_eq!(
+        dataset.variable("data").unwrap().data_type(),
+        &DataType::Int16
+    );
+}
+
+#[tokio::test]
+async fn a_file_of_another_layout_reads_plainly_with_the_convention() {
+    let dataset = open_with("instrument.h5", optodas()).await;
+    assert!(dataset.variable("time").is_none());
+}

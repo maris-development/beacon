@@ -159,6 +159,16 @@ def instrument() -> None:
 
 
 def optodas() -> None:
+    """The OptoDAS miniature with no gap."""
+    optodas_file("optodas.h5", missing=[])
+
+
+def optodas_gap() -> None:
+    """The OptoDAS miniature that reports one missing sample."""
+    optodas_file("optodas-gap.h5", missing=[3])
+
+
+def optodas_file(name: str, missing: list) -> None:
     """A miniature of an ASN OptoDAS acquisition file.
 
     This is `instrument.h5` plus the metadata that layout records about itself:
@@ -169,7 +179,7 @@ def optodas() -> None:
     hand: 6 samples at 125 Hz from 2026-03-28T12:00:00Z, and 4 channels 4 raw
     channels apart, each 1.25 m wide.
     """
-    with h5py.File(os.path.join(HERE, "optodas.h5"), "w") as f:
+    with h5py.File(os.path.join(HERE, name), "w") as f:
         # int16 counts, 6 samples of 4 channels.
         f.create_dataset("data", data=np.arange(24, dtype=np.int16).reshape(6, 4))
         f.create_dataset("fileVersion", data=np.int32(3))
@@ -189,9 +199,11 @@ def optodas() -> None:
         header.create_dataset(
             "channels", data=np.array([0, 4, 8, 12], dtype=np.int32)
         )
-        # An acquisition with no gap. A file that reports one gets no clock.
+        # A file that reports a gap gets no clock.
         header.create_dataset(
-            "missingSamples", shape=(0,), maxshape=(None,), dtype=np.int32
+            "missingSamples",
+            data=np.array(missing, dtype=np.int32),
+            maxshape=(None,),
         )
 
         ranges = header.create_group("dimensionRanges")
@@ -227,8 +239,9 @@ if __name__ == "__main__":
     compound()
     instrument()
     optodas()
+    optodas_gap()
     list_attribute()
     print(
-        "wrote nested-groups.h5, compound.h5, instrument.h5, optodas.h5 "
-        "and list-attribute.h5"
+        "wrote nested-groups.h5, compound.h5, instrument.h5, optodas.h5, "
+        "optodas-gap.h5 and list-attribute.h5"
     )

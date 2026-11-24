@@ -26,11 +26,13 @@ use super::compound::{is_compound, member_variables};
 /// The dataset of every variable of `file`, plus `extra`, sorted by name.
 ///
 /// A file variable wins over an `extra` variable of the same name.
+/// `scaled` names one column and the scale factor that unpacks it.
 pub(crate) fn dataset_of(
     name: &str,
     file: &Arc<AsyncNetcdfFile>,
     phony: &PhonyDimensions,
     extra: Vec<Arc<dyn NdVariable>>,
+    scaled: Option<(&str, f64)>,
 ) -> Result<DatasetSchema> {
     let dataset: Arc<str> = Arc::from(name);
     let bound = file.variables();
@@ -66,7 +68,10 @@ pub(crate) fn dataset_of(
             phony,
             &sizes,
         ) {
-            Ok(variable) => variables.push(Arc::new(variable)),
+            Ok(variable) => variables.push(Arc::new(match scaled {
+                Some((scaled, scale)) if scaled == column => variable.with_scale_factor(scale),
+                _ => variable,
+            })),
             Err(reason) => {
                 tracing::debug!(variable = %column, %reason, "skip an HDF5 dataset")
             }
@@ -224,5 +229,32 @@ mod tests {
         ]);
         let names: Vec<&str> = kept.iter().map(|v| v.name()).collect();
         assert_eq!(names, ["a/b", "c"]);
+    }
+
+    #[tokio::test]
+    async fn a_column_of_the_file_wins_over_an_extra_variable() {
+        use arrow::datatypes::DataType;
+        use beacon_arrow_netcdf::dimensions::PhonyDimensions;
+        use beacon_nd_dataset::NdDataset;
+        use object_store::{local::LocalFileSystem, path::Path, ObjectStore};
+        use oxcdf::AsyncNetcdfFile;
+
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("test_files");
+        let store: Arc<dyn ObjectStore> = Arc::new(LocalFileSystem::new_with_prefix(root).unwrap());
+        let file = Arc::new(
+            AsyncNetcdfFile::open_store(store, Path::from("optodas.h5"))
+                .await
+                .unwrap(),
+        );
+        let phony = PhonyDimensions::of_file(&file);
+        let extra = vec![variable("fileVersion", -1)];
+        let dataset = super::dataset_of("optodas.h5", &file, &phony, extra, None).unwrap();
+        let version = dataset.variable("fileVersion").unwrap();
+        assert_eq!(
+            version.dimensions().rank(),
+            0,
+            "the rank-0 file dataset stays"
+        );
+        assert_eq!(version.data_type(), &DataType::Int32);
     }
 }
