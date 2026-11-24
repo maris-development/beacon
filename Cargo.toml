@@ -106,9 +106,9 @@ nd-arrow-array = "0.5.0"
 # crate's bytes is a change to the format Beacon reads. Pin it exactly.
 atlas-rust = "=0.17.2"
 
-oxcdf = { git = "https://github.com/robinskil/oxcdf.git", tag = "v0.6.0", version = "0.6.0", features = ["async", "object-store", "ndarray", "write"] }
+oxcdf = { git = "https://github.com/robinskil/oxcdf.git", tag = "v0.6.1", version = "0.6.1", features = ["async", "object-store", "ndarray", "write"] }
 
-oxcdf-hdf5 = { git = "https://github.com/robinskil/oxcdf.git", tag = "v0.6.0", version = "0.6.0", features = ["async", "object-store"] }
+oxcdf-hdf5 = { git = "https://github.com/robinskil/oxcdf.git", tag = "v0.6.1", version = "0.6.1", features = ["async", "object-store"] }
 tonic = "0.14.1"
 
 

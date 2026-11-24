@@ -132,6 +132,9 @@ example in a second aggregate:
 SELECT count(*), max(sst) FROM t WHERE lat > -90;
 ```
 
+On a NetCDF table, a query must read at least one column of the file, so a `COUNT(*)` with no other
+column gives an error. Use `count(sst)` or another column that spans the grid.
+
 Coordinates that together span the grid also keep it. `WHERE lat > -90 AND lon > -180 AND
 time > '2024-01-01'` uses all three axes of `sst`. A subquery does not help: the optimizer removes
 a column that the outer query does not use.

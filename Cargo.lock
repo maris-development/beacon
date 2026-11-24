@@ -1074,13 +1074,15 @@ dependencies = [
  "beacon-common",
  "beacon-datafusion-ext",
  "beacon-nd-array",
+ "beacon-nd-dataset",
  "beacon-nd-execution",
+ "beacon-nd-scan",
  "chrono",
  "datafusion 54.1.0",
  "futures",
  "hifitime",
  "indexmap 2.14.0",
- "julian",
+ "nd-arrow-array",
  "ndarray 0.17.2",
  "num-traits",
  "object_store 0.13.2",
@@ -1260,6 +1262,7 @@ dependencies = [
  "beacon-json-query",
  "beacon-lance",
  "beacon-nd-execution",
+ "beacon-nd-scan",
  "beacon-plugin-formats",
  "beacon-plugin-registry",
  "beacon-plugin-sdk",
@@ -8710,8 +8713,8 @@ dependencies = [
 
 [[package]]
 name = "oxcdf"
-version = "0.6.0"
-source = "git+https://github.com/robinskil/oxcdf.git?tag=v0.6.0#b3b943595ed191b286d9cf1f8b0d4ac4aca6d429"
+version = "0.6.1"
+source = "git+https://github.com/robinskil/oxcdf.git?tag=v0.6.1#8ac5d53ad3982613a456486c08e3dbb75a37c3a0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -8724,8 +8727,8 @@ dependencies = [
 
 [[package]]
 name = "oxcdf-hdf5"
-version = "0.6.0"
-source = "git+https://github.com/robinskil/oxcdf.git?tag=v0.6.0#b3b943595ed191b286d9cf1f8b0d4ac4aca6d429"
+version = "0.6.1"
+source = "git+https://github.com/robinskil/oxcdf.git?tag=v0.6.1#8ac5d53ad3982613a456486c08e3dbb75a37c3a0"
 dependencies = [
  "async-trait",
  "bytes",

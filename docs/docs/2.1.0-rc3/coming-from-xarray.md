@@ -162,7 +162,7 @@ does not fail. See [UNION BY NAME](/docs/2.1.0-rc3/sql/union-by-name).
   `df.set_index([...]).to_xarray()`.
 - **No lazy dask arrays.** The server streams the result instead. Aggregate or filter on the
   server. Then read back what fits in memory.
-- **Non-standard calendars are unsupported.** `noleap` and `360_day` files are rejected. See
+- **Non-standard calendars are unsupported.** A `noleap` or `360_day` time axis stays numbers. See
   [CF decoding](/docs/2.1.0-rc3/cf-decoding#supported-calendars).
 
 ## Keep both

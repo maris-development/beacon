@@ -49,7 +49,7 @@ widening.
 CREATE VIEW all_profiles AS
     SELECT * FROM read_netcdf(['argo/**/*.nc'])
     UNION ALL BY NAME
-    SELECT * FROM read_netcdf(['wod/**/*.nc'])
+    SELECT * FROM read_netcdf(['ctd/**/*.nc'])
 ```
 
 ## `SHOW CREATE VIEW`

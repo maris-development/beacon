@@ -30,8 +30,8 @@ use futures::TryStreamExt;
 /// then drops most of the cells, which is the shape a real CORA query has.
 ///
 /// Override it with `BEACON_PROFILE_QUERY` to attribute the cost by stage —
-/// fewer columns isolates the per-column read, dropping the predicate isolates
-/// the filter, and `count(*)` takes the flat path that never builds an nd array.
+/// fewer columns isolates the per-column read, and dropping the predicate
+/// isolates the filter. A NetCDF scan needs one file column, so `count(*)` fails.
 const QUERY: &str = r#"SELECT "TEMP", "TIME", "LATITUDE", "LONGITUDE", "DEPH" FROM scan
                        WHERE "DEPH" < 5 AND "TEMP" IS NOT NULL"#;
 
