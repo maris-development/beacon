@@ -10,11 +10,12 @@ use std::sync::Arc;
 
 use arrow::compute::concat_batches;
 use arrow::record_batch::RecordBatch;
-use beacon_arrow_hdf5::{Hdf5Config, Hdf5FormatFactory};
+use beacon_arrow_hdf5::{Hdf5Config, Hdf5FormatFactory, Hdf5Opener};
 use beacon_arrow_netcdf::datafusion::{options::NetcdfOptions, NetCDFFormatFactory, NetcdfConfig};
 use beacon_datafusion_ext::fast_object::FastObjectTable;
 use beacon_datafusion_ext::format_ext::FileFormatFactoryExt;
 use beacon_datafusion_ext::listing_factory::ListingFactory;
+use beacon_nd_scan::NdFileOpener;
 use datafusion::common::stats::Precision;
 use datafusion::datasource::file_format::FileFormatFactory;
 use datafusion::datasource::listing::ListingTableUrl;
@@ -340,15 +341,9 @@ async fn a_nested_group_reads_end_to_end() {
     assert_eq!(batch.num_columns(), 3);
 }
 
-/// A partitioned table reads, and every row holds the value of its own file's
-/// path.
-///
-/// A `PARTITIONED BY` column is in the *path* of a file, and an HDF5 scan reads
-/// a whole collection behind one plan entry, so `FileStream` cannot append it:
-/// it does not know which file a batch came from. The reader appends it itself
-/// instead — per file, which is per morsel.
+/// An ND scan has no partition columns, so a partitioned table is refused.
 #[tokio::test]
-async fn a_partitioned_table_gives_every_row_the_value_of_its_path() {
+async fn a_partitioned_table_is_not_implemented() {
     use datafusion::datasource::listing::{ListingOptions, ListingTable, ListingTableConfig};
 
     let dir = tempfile::tempdir().unwrap();
@@ -378,27 +373,21 @@ async fn a_partitioned_table_gives_every_row_the_value_of_its_path() {
     ctx.register_table("obs", Arc::new(ListingTable::try_new(config).unwrap()))
         .unwrap();
 
-    let batch = collect(
-        &ctx,
-        r#"SELECT site, station_id, "observations/temperature"
-           FROM obs ORDER BY site, station_id, "observations/temperature""#,
-    )
-    .await;
-
-    // Twelve rows per copy: 3 stations x 4 samples, as the fixture holds.
-    assert_eq!(batch.num_rows(), 24, "both copies are read, whole");
-    let sites = arrow::array::AsArray::as_string::<i32>(batch.column(0));
-    let seen: Vec<&str> = (0..batch.num_rows()).map(|row| sites.value(row)).collect();
-    assert_eq!(
-        seen.iter().filter(|site| **site == "north").count(),
-        12,
-        "one copy's rows carry north"
+    let error = ctx
+        .sql(r#"SELECT site, station_id FROM obs"#)
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            error.find_root(),
+            datafusion::error::DataFusionError::NotImplemented(_)
+        ),
+        "{error}"
     );
-    assert_eq!(
-        seen.iter().filter(|site| **site == "south").count(),
-        12,
-        "and the other's carry south"
-    );
+    assert!(error.to_string().contains("site"), "{error}");
 }
 
 /// A dataset of one group carries the rows of a dataset of another.
@@ -455,16 +444,10 @@ async fn a_root_dataset_aligns_with_a_nested_one() {
 #[tokio::test]
 async fn an_instrument_file_defaults_to_the_grid_of_its_payload() {
     let ctx = session();
-    register(
-        &ctx,
-        "instrument",
-        &hdf5_file(INSTRUMENT_FILE),
-    )
-    .await;
+    register(&ctx, "instrument", &hdf5_file(INSTRUMENT_FILE)).await;
 
-    let batch = collect(&ctx, "SELECT count(*) AS rows FROM instrument").await;
-    let rows = arrow::array::as_primitive_array::<arrow::datatypes::Int64Type>(batch.column(0));
-    assert_eq!(rows.value(0), 24, "6 samples x 4 channels");
+    let batch = collect(&ctx, "SELECT * FROM instrument").await;
+    assert_eq!(batch.num_rows(), 24, "6 samples x 4 channels");
 }
 
 /// The description of each channel lines up with the payload, two groups away.
@@ -475,12 +458,7 @@ async fn an_instrument_file_defaults_to_the_grid_of_its_payload() {
 #[tokio::test]
 async fn a_channel_description_lines_up_with_the_payload() {
     let ctx = session();
-    register(
-        &ctx,
-        "instrument",
-        &hdf5_file(INSTRUMENT_FILE),
-    )
-    .await;
+    register(&ctx, "instrument", &hdf5_file(INSTRUMENT_FILE)).await;
 
     let batch = collect(
         &ctx,
@@ -530,12 +508,7 @@ async fn a_channel_description_lines_up_with_the_payload() {
 #[tokio::test]
 async fn the_metadata_grid_needs_an_explicit_dimension_list() {
     let ctx = session();
-    register(
-        &ctx,
-        "instrument",
-        &hdf5_file(INSTRUMENT_FILE),
-    )
-    .await;
+    register(&ctx, "instrument", &hdf5_file(INSTRUMENT_FILE)).await;
 
     let columns: Vec<String> = ctx
         .table("instrument")
@@ -592,9 +565,7 @@ async fn the_skip_option_reads_past_a_file_the_dimension_list_does_not_fit() {
             ("read_dimensions".to_string(), "phony_len_3".to_string()),
             ("skip_unbroadcastable".to_string(), skip.to_string()),
         ]);
-        let format = factory()
-            .create(&ctx.state(), &options)
-            .unwrap();
+        let format = factory().create(&ctx.state(), &options).unwrap();
         FastObjectTable::try_new(&ctx.state(), format, vec![url.clone()]).await
     };
 
@@ -752,10 +723,9 @@ async fn a_file_of_another_layout_still_reads() {
     let ctx = session();
     register_optodas(&ctx, "mixed", &hdf5_file(INSTRUMENT_FILE)).await;
 
-    let batch = collect(&ctx, "SELECT count(*) AS rows FROM mixed").await;
-    let rows = arrow::array::as_primitive_array::<arrow::datatypes::Int64Type>(batch.column(0));
+    let batch = collect(&ctx, "SELECT * FROM mixed").await;
     assert_eq!(
-        rows.value(0),
+        batch.num_rows(),
         24,
         "the file reads as it does with no convention"
     );
@@ -768,27 +738,28 @@ async fn a_file_of_another_layout_still_reads() {
 /// touches the file. This holds the line.
 #[tokio::test]
 async fn a_netcdf_file_keeps_the_dimension_names_it_carries() {
-    for file in [GRIDDED_FILE, WOD_FILE] {
+    for file in [GRIDDED_FILE] {
         let path = netcdf_file(file);
         let store: Arc<dyn object_store::ObjectStore> = Arc::new(
             object_store::local::LocalFileSystem::new_with_prefix(path.parent().unwrap()).unwrap(),
         );
-        let dataset = beacon_arrow_hdf5::reader::open_dataset(
-            store,
-            object_store::path::Path::from(file),
-            beacon_arrow_hdf5::ReadOptions::default(),
-        )
-        .await
-        .unwrap_or_else(|e| panic!("open {file}: {e}"));
+        let meta = store
+            .head(&object_store::path::Path::from(file))
+            .await
+            .unwrap();
+        let dataset = Hdf5Opener::new(beacon_arrow_hdf5::ReadOptions::default())
+            .open(store, &meta)
+            .await
+            .unwrap_or_else(|e| panic!("open {file}: {e}"));
 
         assert!(
-            dataset.dataset().invented_dimensions.is_empty(),
+            dataset.invented_dimensions().is_empty(),
             "{file} names every dimension, so the reader invents none"
         );
-        let invented: Vec<&String> = dataset
-            .dataset()
-            .dimensions
-            .keys()
+        let invented: Vec<&str> = dataset
+            .dimensions()
+            .iter()
+            .map(|dimension| dimension.name())
             .filter(|name| name.starts_with("phony_"))
             .collect();
         assert!(invented.is_empty(), "{file} carries {invented:?}");
@@ -828,15 +799,65 @@ async fn an_object_reads_with_no_local_copy() {
     let bytes = std::fs::read(hdf5_file(NESTED_FILE)).unwrap();
     store.put(&path, bytes.into()).await.unwrap();
 
-    let dataset = beacon_arrow_hdf5::reader::open_dataset(
-        store,
-        path,
-        beacon_arrow_hdf5::ReadOptions::default(),
+    let meta = store.head(&path).await.unwrap();
+    let dataset = Hdf5Opener::new(beacon_arrow_hdf5::ReadOptions::default())
+        .open(store, &meta)
+        .await
+        .expect("an in-memory object opens with no local file");
+    assert!(dataset.variable("observations/temperature").is_some());
+    assert!(dataset.variable("observations/qc/flag").is_some());
+}
+
+/// `COUNT(*)` reads no column, and an ND scan needs one.
+#[tokio::test]
+async fn count_star_needs_a_column() {
+    let ctx = session();
+    register(&ctx, "nested", &hdf5_file(NESTED_FILE)).await;
+    let error = ctx
+        .sql("SELECT COUNT(*) FROM nested")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("COUNT(column)"), "{error}");
+}
+
+/// A table that keeps the names of the reader still reads.
+#[tokio::test]
+async fn a_table_without_unification_still_reads() {
+    let ctx = session();
+    let url = ListingTableUrl::parse(hdf5_file(NESTED_FILE).to_string_lossy()).unwrap();
+    let format = factory()
+        .create(
+            &ctx.state(),
+            &HashMap::from([("unify_phony_dimensions".to_string(), "false".to_string())]),
+        )
+        .unwrap();
+    let options = datafusion::datasource::listing::ListingOptions::new(format)
+        .with_file_extension("")
+        .with_collect_stat(false);
+    let config = datafusion::datasource::listing::ListingTableConfig::new(url)
+        .with_listing_options(options)
+        .infer_schema(&ctx.state())
+        .await
+        .unwrap();
+    ctx.register_table(
+        "plain",
+        Arc::new(datafusion::datasource::listing::ListingTable::try_new(config).unwrap()),
     )
-    .await
-    .expect("an in-memory object opens with no local file");
-    assert!(dataset.get_array("observations/temperature").is_some());
-    assert!(dataset.get_array("observations/qc/flag").is_some());
+    .unwrap();
+
+    let batches = ctx
+        .sql("SELECT * FROM plain")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+    let rows: usize = batches.iter().map(|batch| batch.num_rows()).sum();
+    assert!(rows > 0, "SELECT * returns rows");
 }
 
 // ─── Concurrency ────────────────────────────────────────────────────────────
@@ -919,7 +940,7 @@ fn columns_with_a_range(statistics: &datafusion::common::Statistics) -> usize {
 async fn the_analysis_format_computes_statistics() {
     let ctx = session();
     let state = ctx.state();
-    let path = netcdf_file(WOD_FILE);
+    let path = netcdf_file(GRIDDED_FILE);
     let (store, object) = local_object(&path);
 
     let rust = analysis_format_on(&ctx, &path);
@@ -985,7 +1006,7 @@ async fn statistics_cover_a_plain_hdf5_file() {
 async fn disabling_statistics_turns_them_off() {
     let ctx = session();
     let state = ctx.state();
-    let path = netcdf_file(WOD_FILE);
+    let path = netcdf_file(GRIDDED_FILE);
     let (store, object) = local_object(&path);
 
     let on = format_on(&ctx);
@@ -1060,21 +1081,21 @@ async fn a_predicate_reaches_the_scan_and_skips_its_chunks() {
         visitor.0.expect("the scan reports its output rows")
     };
 
-    let whole = chunks_read("SELECT lat FROM t").await;
+    let whole = chunks_read("SELECT analysed_sst, lat FROM t").await;
     assert!(whole > 1, "the fixture must hold several chunks");
 
     assert_eq!(
-        chunks_read("SELECT lat FROM t WHERE lat > 1000").await,
+        chunks_read("SELECT analysed_sst, lat FROM t WHERE lat > 1000").await,
         0,
         "a predicate no row can meet must leave the scan nothing to read"
     );
     assert_eq!(
-        chunks_read("SELECT lat FROM t WHERE lat > 0").await,
+        chunks_read("SELECT analysed_sst, lat FROM t WHERE lat > 0").await,
         whole,
         "a predicate every row meets must not skip a chunk"
     );
 
-    let partial = chunks_read("SELECT lat FROM t WHERE lat > 44").await;
+    let partial = chunks_read("SELECT analysed_sst, lat FROM t WHERE lat > 44").await;
     assert!(
         partial > 0 && partial < whole,
         "lat > 44 should read some of the {whole} chunks, it read {partial}"
@@ -1130,5 +1151,26 @@ async fn a_pruned_scan_counts_what_the_coordinate_says_it_should() {
         count("SELECT count(*) FROM t WHERE lat > 0 OR lat > 60").await,
         lats.iter().filter(|lat| **lat > 0.0).count(),
         "a disjunction must not prune on one of its branches"
+    );
+}
+
+/// A ragged NetCDF-4 file is refused, as the NetCDF reader refuses it.
+#[tokio::test]
+async fn a_ragged_file_is_refused() {
+    let path = netcdf_file(WOD_FILE);
+    let store: Arc<dyn ObjectStore> = Arc::new(
+        object_store::local::LocalFileSystem::new_with_prefix(path.parent().unwrap()).unwrap(),
+    );
+    let meta = store
+        .head(&object_store::path::Path::from(WOD_FILE))
+        .await
+        .unwrap();
+    let error = Hdf5Opener::new(beacon_arrow_hdf5::ReadOptions::default())
+        .open(store, &meta)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, beacon_nd_dataset::Error::Unsupported { .. }),
+        "{error}"
     );
 }
