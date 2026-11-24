@@ -1,9 +1,11 @@
 //! The DataFusion [`FileSource`] and [`FileOpener`] for Atlas collections.
 //!
-//! A plan entry is one collection; partitions share its datasets through
-//! [`CollectionQueues`] instead of splitting it by byte range.
+//! Every partition walks the plan's collections in one order and shares the
+//! datasets of the collection at hand through [`CollectionQueues`], instead
+//! of splitting a collection by byte range.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use datafusion::{
     common::plan_err,
@@ -22,7 +24,7 @@ use datafusion::{
 };
 use datafusion_datasource::projection::{ProjectionOpener, SplitProjection};
 use futures::{FutureExt, StreamExt, TryStreamExt};
-use object_store::ObjectStore;
+use object_store::{ObjectMeta, ObjectStore};
 use tokio_util::sync::CancellationToken;
 
 use beacon_datafusion_ext::scan_adapt::AdaptingOpener;
@@ -31,7 +33,6 @@ use beacon_datafusion_ext::type_widening::{ArrowTypeWideningStrategy, DefaultArr
 use crate::{
     error::external,
     metrics::AtlasScanMetrics,
-    open::AtlasReaderCache,
     scan::{CollectionQueues, ScanSpec},
 };
 
@@ -49,9 +50,7 @@ pub struct AtlasSource {
     /// The projection the scan pushed down, split into the columns to read
     /// and the rest, which `ProjectionOpener` applies above the adapter.
     projection: SplitProjection,
-    /// The reader cache every open goes through.
-    cache: AtlasReaderCache,
-    /// The scan's queues, one per collection, shared by every partition.
+    /// The scan's walk over its collections, shared by every partition.
     queues: Arc<CollectionQueues>,
     /// The rule that merged the table schema. It decides which casts read
     /// null. The format sets it from the session when it plans.
@@ -62,11 +61,7 @@ pub struct AtlasSource {
 }
 
 impl AtlasSource {
-    pub fn new(
-        read_dimensions: Option<Vec<String>>,
-        table_schema: TableSchema,
-        cache: AtlasReaderCache,
-    ) -> Self {
+    pub fn new(read_dimensions: Option<Vec<String>>, table_schema: TableSchema) -> Self {
         Self {
             projection: SplitProjection::unprojected(&table_schema),
             table_schema,
@@ -75,7 +70,6 @@ impl AtlasSource {
             read_dimensions,
             skip_unbroadcastable: false,
             declared_columns: false,
-            cache,
             queues: Arc::new(CollectionQueues::new()),
             type_widening: Arc::new(DefaultArrowTypeWidening::new()),
             cancel: CancellationToken::new(),
@@ -146,7 +140,7 @@ impl FileSource for AtlasSource {
     fn create_file_opener(
         &self,
         object_store: Arc<dyn ObjectStore>,
-        _base_config: &FileScanConfig,
+        base_config: &FileScanConfig,
         partition: usize,
     ) -> Result<Arc<dyn FileOpener>> {
         self.require_projection()?;
@@ -163,10 +157,11 @@ impl FileSource for AtlasSource {
         .with_skip_unbroadcastable(self.skip_unbroadcastable);
         let raw: Arc<dyn FileOpener> = Arc::new(AtlasOpener {
             object_store,
-            cache: self.cache.clone(),
+            collections: walk_order(base_config),
             spec: Arc::new(spec),
             scan_metrics: AtlasScanMetrics::new(&self.execution_plan_metrics, partition),
             queues: Arc::clone(&self.queues),
+            joined: Arc::new(AtomicBool::new(false)),
         });
         let adapting = AdaptingOpener::wrap(raw, read_schema, Arc::clone(&self.type_widening));
         ProjectionOpener::try_new(self.projection.clone(), adapting, file_schema)
@@ -237,42 +232,53 @@ impl FileSource for AtlasSource {
     }
 }
 
-/// One partition's opener: a collection in, its batches out, each under its
-/// dataset's own columns. Every field is a handle, cheap to clone into the
-/// stream it returns.
+/// Every collection in the plan's groups, once each, in path order.
+fn walk_order(config: &FileScanConfig) -> Arc<[ObjectMeta]> {
+    let mut collections: Vec<ObjectMeta> = config
+        .file_groups
+        .iter()
+        .flat_map(|group| group.files())
+        .map(|file| file.object_meta.clone())
+        .collect();
+    collections.sort_by(|a, b| a.location.cmp(&b.location));
+    collections.dedup_by(|a, b| a.location == b.location);
+    collections.into()
+}
+
+/// One partition's opener: it joins the scan's walk over every collection,
+/// and streams batches each under its dataset's own columns. Every field is
+/// a handle, cheap to clone into the stream it returns.
 #[derive(Clone)]
 pub struct AtlasOpener {
     pub object_store: Arc<dyn ObjectStore>,
-    /// The reader cache every open goes through.
-    pub cache: AtlasReaderCache,
+    /// Every collection of the scan, in the order the walk reads them.
+    pub collections: Arc<[ObjectMeta]>,
     /// What the scan reads.
     pub spec: Arc<ScanSpec>,
     pub scan_metrics: AtlasScanMetrics,
-    /// The scan's queues, one per collection, shared by every partition.
+    /// The scan's walk over its collections, shared by every partition.
     pub queues: Arc<CollectionQueues>,
+    /// Set once this partition has joined the walk.
+    pub joined: Arc<AtomicBool>,
 }
 
 impl FileOpener for AtlasOpener {
-    /// One collection in, one batch per stored chunk out.
+    /// The partition's first file joins the walk, which reads every
+    /// collection in turn. Its later files stream nothing.
     ///
-    /// The first partition to open it prunes and queues its datasets.
-    fn open(&self, file: PartitionedFile) -> Result<FileOpenFuture> {
-        let opener = self.clone();
-        let fut = async move {
-            let stream = opener
-                .queues
-                .open(
-                    Some(&opener.cache),
-                    opener.object_store,
-                    file.object_meta,
-                    opener.spec,
-                    opener.scan_metrics,
-                )
-                .await
-                .map_err(external)?;
-            Ok(stream.map_err(external).boxed())
-        };
-        Ok(fut.boxed())
+    /// DataFusion may hand a file to any partition, so the file does not
+    /// choose the collection: every partition reads the collection at hand.
+    fn open(&self, _file: PartitionedFile) -> Result<FileOpenFuture> {
+        if self.joined.swap(true, Ordering::AcqRel) {
+            return Ok(futures::future::ready(Ok(futures::stream::empty().boxed())).boxed());
+        }
+        let stream = self.queues.open(
+            Arc::clone(&self.object_store),
+            Arc::clone(&self.collections),
+            Arc::clone(&self.spec),
+            self.scan_metrics.clone(),
+        );
+        Ok(futures::future::ready(Ok(stream.map_err(external).boxed())).boxed())
     }
 }
 
@@ -330,10 +336,11 @@ mod tests {
         let metrics = AtlasScanMetrics::new(&ExecutionPlanMetricsSet::new(), 0);
         let raw: Arc<dyn FileOpener> = Arc::new(AtlasOpener {
             object_store: store,
-            cache: AtlasReaderCache::new(4),
+            collections: Arc::from(vec![marker.clone()]),
             spec: Arc::new(spec),
             scan_metrics: metrics.clone(),
             queues: Arc::new(CollectionQueues::new()),
+            joined: Arc::new(AtomicBool::new(false)),
         });
         let opener = AdaptingOpener::wrap(
             raw,
@@ -379,6 +386,22 @@ mod tests {
             .map(|batch| decode_nd_record_batch(batch).unwrap().num_rows())
             .collect();
         assert_eq!(rows, vec![4, 3], "winter, then summer");
+        assert_eq!(fixture.metrics.datasets_scanned.value(), 2);
+    }
+
+    /// A partition joins the walk on its first file. Its later files stream
+    /// nothing, so no dataset is read twice.
+    #[tokio::test]
+    async fn a_second_file_of_a_partition_streams_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        test_support::two_datasets(tmp.path()).await;
+        let fixture = opener(tmp.path(), None).await;
+
+        let first = stream(&fixture).await;
+        let second = stream(&fixture).await;
+
+        assert_eq!(first.len(), 2);
+        assert!(second.is_empty());
         assert_eq!(fixture.metrics.datasets_scanned.value(), 2);
     }
 
