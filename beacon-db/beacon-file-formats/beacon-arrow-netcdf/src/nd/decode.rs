@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use arrow::array::{Array, AsArray, Float64Array, TimestampMicrosecondArray};
 use arrow::datatypes::{DataType, Float64Type};
-use beacon_common::cf_time::{parse_cf_time, CfScale};
+use beacon_common::cf_time::parse_cf_time;
 use nd_arrow_array::compute::cf::{decode_cf, is_cf_key, ADD_OFFSET, SCALE_FACTOR};
 use nd_arrow_array::compute::elementwise::cast;
 use nd_arrow_array::compute::time::{decode_cf_time, timestamp_type, CfTimeUnits, CALENDAR, UNITS};
@@ -19,7 +19,7 @@ pub(crate) enum Decode {
     Cf,
     /// A CF time variable: `decode_cf_time`.
     Time,
-    /// A Julian-calendar time variable: the `beacon_common::cf_time` path, in microseconds.
+    /// A Julian-calendar time variable: the `beacon_common::cf_time` epoch, in microseconds.
     JulianTime {
         epoch: hifitime::Epoch,
         unit: hifitime::Unit,
@@ -107,14 +107,15 @@ impl Decode {
                 Ok(stamps.with_attributes(kept))
             }
             Decode::JulianTime { epoch, unit } => {
-                let scale = CfScale::new(*epoch, *unit);
-                let epoch_nanos = epoch.to_unix_duration().total_nanoseconds() as f64;
-                let unit_nanos = (1.0 * *unit).total_nanoseconds() as f64;
-                let (numbers, kept) =
-                    time_numbers(&raw, |v| (epoch_nanos + v * unit_nanos).abs() < NANOS_LIMIT)?;
+                let epoch_micros = epoch
+                    .to_unix_duration()
+                    .total_nanoseconds()
+                    .div_euclid(1000);
+                let unit_micros = (1.0 * *unit).total_nanoseconds().div_euclid(1000);
+                let (numbers, kept) = time_numbers(&raw, |_| true)?;
                 let stamps: TimestampMicrosecondArray = numbers
                     .iter()
-                    .map(|v| v.and_then(|v| scale.nanos(v)).map(|nanos| nanos / 1000))
+                    .map(|v| v.and_then(|v| julian_micros(epoch_micros, unit_micros, v)))
                     .collect();
                 Ok(NdArrowArray::try_new(Arc::new(stamps), raw.dims().clone())?
                     .with_attributes(kept))
@@ -123,8 +124,15 @@ impl Decode {
     }
 }
 
-/// A bound below `i64::MAX` nanoseconds, so `CfScale::nanos` never saturates.
-const NANOS_LIMIT: f64 = 9.2e18;
+/// `epoch + round(v * unit)` in microseconds, or `None` when it is not an `i64`.
+fn julian_micros(epoch_micros: i128, unit_micros: i128, v: f64) -> Option<i64> {
+    let offset = (v * unit_micros as f64).round();
+    // The bound keeps the cast to `i128` exact; a larger offset is outside `i64` anyway.
+    if !offset.is_finite() || offset.abs() >= 1e30 {
+        return None;
+    }
+    i64::try_from(epoch_micros + offset as i128).ok()
+}
 
 /// The value type of an attribute: the item type of a list, else its own type.
 fn item_type(data_type: &DataType) -> DataType {
@@ -435,6 +443,31 @@ mod tests {
         let (decode, out) = decode(&julian_time());
         assert!(matches!(decode, Decode::JulianTime { .. }));
         assert_eq!(stamps(&out), vec![Some(expected)]);
+    }
+
+    fn julian_days(units: &str, value: f64) -> NdArrowArray {
+        array(
+            Arc::new(Float64Array::from(vec![value])),
+            Attributes::new()
+                .with("units", units)
+                .with("calendar", "julian"),
+        )
+    }
+
+    #[test]
+    fn a_julian_time_with_an_old_epoch_decodes() {
+        let (decode, out) = decode(&julian_days("days since 0001-01-01", 730_000.0));
+        assert!(matches!(decode, Decode::JulianTime { .. }));
+        // Julian 0001-01-01 is Gregorian 0000-12-30.
+        let expected = micros(0, 12, 30, 0) + 730_000 * 86_400_000_000;
+        assert_eq!(stamps(&out), vec![Some(expected)]);
+    }
+
+    #[test]
+    fn a_julian_time_before_1677_decodes() {
+        let (_, out) = decode(&julian_days("days since 1600-01-01", 10.5));
+        // Julian 1600-01-01 is Gregorian 1600-01-11.
+        assert_eq!(stamps(&out), vec![Some(micros(1600, 1, 21, 12))]);
     }
 
     #[test]
