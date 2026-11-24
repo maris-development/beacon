@@ -11,15 +11,11 @@ use std::sync::Arc;
 
 use arrow::datatypes::SchemaRef;
 use beacon_datafusion_ext::type_widening::{ArrowTypeWidening, LabeledSchema};
-use beacon_nd_scan::{file_schema, open_for_read};
-use object_store::{ObjectMeta, ObjectStore, memory::InMemory, path::Path};
+use beacon_nd_scan::file_schema;
 use zarrs::group::Group;
 use zarrs_storage::AsyncReadableListableStorageTraits;
 
-use crate::{
-    datafusion::opener::{ZarrOpener, scan_options},
-    util::{NOMINAL_GROUP_SIZE, ZarrStorage, group_metadata_key, recursive_groups},
-};
+use crate::{datafusion::opener::open_leaf, util::recursive_groups};
 
 /// The merged Arrow schema of every leaf group under `group_path`.
 ///
@@ -50,25 +46,19 @@ pub async fn schema_from_group_path(
     let mut leaves = Vec::new();
     recursive_groups(Arc::new(group), &mut leaves).await?;
 
-    let opener = ZarrOpener::new(Some(ZarrStorage::new(storage)));
-    let options = scan_options(read_dimensions, skip_unbroadcastable);
-    // The opener reads the storage above, so it never reads this store.
-    let unused_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     let mut schemas = Vec::new();
     let mut skipped = 0usize;
     for leaf in leaves {
         // The group path names the leaf, so a refused column names both leaves.
         let leaf_path = leaf.path().as_str().to_string();
-        let meta = ObjectMeta {
-            location: Path::from(group_metadata_key(&leaf_path)),
-            last_modified: Default::default(),
-            size: NOMINAL_GROUP_SIZE,
-            e_tag: None,
-            version: None,
-        };
-        let Some(dataset) = open_for_read(&opener, unused_store.clone(), &meta, &options)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to read Zarr group as dataset: {e}"))?
+        let Some(dataset) = open_leaf(
+            storage.clone(),
+            &leaf_path,
+            read_dimensions.clone(),
+            skip_unbroadcastable,
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to read Zarr group as dataset: {e}"))?
         else {
             skipped += 1;
             continue;

@@ -4,12 +4,13 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use beacon_nd_dataset::{Error, GridSelection, NdDataset, Result, attribute_columns};
-use beacon_nd_scan::{NdFileOpener, NdScanOptions, NdSource};
+use beacon_nd_scan::{NdFileOpener, NdScanOptions, NdSource, open_for_read};
 use datafusion::datasource::table_schema::TableSchema;
-use object_store::{ObjectMeta, ObjectStore};
+use object_store::{ObjectMeta, ObjectStore, memory::InMemory, path::Path};
+use zarrs_storage::AsyncReadableListableStorageTraits;
 
 use crate::nd::open_group;
-use crate::util::{ZarrPath, ZarrStorage};
+use crate::util::{NOMINAL_GROUP_SIZE, ZarrPath, ZarrStorage, group_metadata_key};
 
 /// Opens the leaf group of a `zarr.json` object. It reads the metadata only.
 #[derive(Debug)]
@@ -65,6 +66,29 @@ pub fn scan_options(
     }
 }
 
+/// Open the leaf group at `leaf_path` over `storage` as the ND scan opens it.
+///
+/// `Ok(None)` when the scan options skip the leaf.
+pub(crate) async fn open_leaf(
+    storage: Arc<dyn AsyncReadableListableStorageTraits>,
+    leaf_path: &str,
+    read_dimensions: Option<Vec<String>>,
+    skip_unbroadcastable: bool,
+) -> datafusion::error::Result<Option<Arc<dyn NdDataset>>> {
+    let opener = ZarrOpener::new(Some(ZarrStorage::new(storage)));
+    let options = scan_options(read_dimensions, skip_unbroadcastable);
+    // The opener reads the storage above, so it never reads this store.
+    let unused_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let meta = ObjectMeta {
+        location: Path::from(group_metadata_key(leaf_path)),
+        last_modified: Default::default(),
+        size: NOMINAL_GROUP_SIZE,
+        e_tag: None,
+        version: None,
+    };
+    open_for_read(&opener, unused_store, &meta, &options).await
+}
+
 /// The file source of each Zarr scan. `table_schema` is the encoded schema.
 pub fn zarr_source(
     table_schema: TableSchema,
@@ -92,7 +116,7 @@ mod tests {
     use object_store::{ObjectMeta, ObjectStore};
     use serde_json::json;
 
-    use super::{ZarrOpener, scan_options, zarr_source};
+    use super::{ZarrOpener, open_leaf, scan_options, zarr_source};
     use crate::nd::testing::{TestStore, write_array, write_group};
 
     fn meta(path: &str) -> ObjectMeta {
@@ -165,6 +189,25 @@ mod tests {
         assert_eq!(options.min_slice_size, Some(0));
 
         assert_eq!(scan_options(None, false).grid, GridSelection::PerFile);
+    }
+
+    #[tokio::test]
+    async fn open_leaf_opens_skips_and_refuses_as_the_scan_does() {
+        let store = group().await;
+        let storage = store.storage().inner();
+
+        let dataset = open_leaf(storage.clone(), "/s.zarr", None, false)
+            .await
+            .unwrap()
+            .expect("the leaf opens");
+        assert!(dataset.variable("a").is_some());
+
+        let off_grid = Some(vec!["y".to_string()]);
+        let skipped = open_leaf(storage.clone(), "/s.zarr", off_grid.clone(), true).await;
+        assert!(matches!(skipped, Ok(None)), "{skipped:?}");
+
+        let refused = open_leaf(storage, "/s.zarr", off_grid, false).await;
+        assert!(refused.is_err(), "{refused:?}");
     }
 
     #[test]

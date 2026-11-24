@@ -35,20 +35,19 @@ use std::sync::Arc;
 use arrow::array::{Array, AsArray};
 use arrow::datatypes::{DataType, Field, Float64Type, Schema};
 use beacon_nd_dataset::{Attributes, NdDataset, NdVariable};
-use beacon_nd_scan::{file_statistics, open_for_read};
+use beacon_nd_scan::file_statistics;
 use datafusion::{
     common::{ColumnStatistics, Statistics, stats::Precision},
     scalar::ScalarValue,
 };
 use nd_arrow_array::compute::cf::{ADD_OFFSET, SCALE_FACTOR};
-use object_store::{ObjectMeta, ObjectStore, memory::InMemory, path::Path};
 use zarrs::group::Group;
 use zarrs_storage::AsyncReadableListableStorageTraits;
 
 use crate::{
-    datafusion::opener::{ZarrOpener, scan_options},
+    datafusion::opener::open_leaf,
     nd::decode::{BoundSide, time_bound},
-    util::{NOMINAL_GROUP_SIZE, ZarrStorage, group_metadata_key, recursive_groups},
+    util::recursive_groups,
 };
 
 // ─── Public entry point ─────────────────────────────────────────────────────
@@ -82,23 +81,17 @@ pub async fn generate_statistics(
         .map(|field| field.name().clone())
         .collect();
 
-    let opener = ZarrOpener::new(Some(ZarrStorage::new(storage)));
-    let options = scan_options(read_dimensions, skip_unbroadcastable);
-    // The opener reads the storage above, so it never reads this store.
-    let unused_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     let mut store_ranges = StoreRanges::default();
     for leaf in &leaves {
-        let meta = ObjectMeta {
-            location: Path::from(group_metadata_key(leaf.path().as_str())),
-            last_modified: Default::default(),
-            size: NOMINAL_GROUP_SIZE,
-            e_tag: None,
-            version: None,
-        };
         // The scan open: a leaf that the scan skips is not measured.
-        let Some(dataset) = open_for_read(&opener, unused_store.clone(), &meta, &options)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to read Zarr group as dataset: {e}"))?
+        let Some(dataset) = open_leaf(
+            storage.clone(),
+            leaf.path().as_str(),
+            read_dimensions.clone(),
+            skip_unbroadcastable,
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to read Zarr group as dataset: {e}"))?
         else {
             continue;
         };
