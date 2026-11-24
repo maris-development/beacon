@@ -28,7 +28,11 @@ pub(crate) enum Decode {
 
 impl Decode {
     /// Spec 8.4: the choice from the stored type and the attributes. No I/O.
-    pub(crate) fn choose(_stored: &DataType, attributes: &Attributes) -> Decode {
+    pub(crate) fn choose(stored: &DataType, attributes: &Attributes) -> Decode {
+        // The read handles the fill of a string variable.
+        if !(stored.is_integer() || stored.is_floating()) {
+            return Decode::None;
+        }
         if let Some(time) = Self::choose_time(attributes) {
             return time;
         }
@@ -171,6 +175,7 @@ mod tests {
 
     use arrow::array::{
         Array, ArrayRef, AsArray, Float32Array, Float64Array, Int16Array, Int32Array, Int64Array,
+        StringArray,
     };
     use arrow::datatypes::{
         Float32Type, Float64Type, Int16Type, Int32Type, Int64Type, TimestampMicrosecondType,
@@ -323,6 +328,16 @@ mod tests {
         )
     }
 
+    fn string_variable() -> NdArrowArray {
+        array(
+            Arc::new(StringArray::from(vec!["a", "-"])),
+            Attributes::new()
+                .with("_FillValue", "-")
+                .with("scale_factor", 0.5f32)
+                .with("units", "days since 1970-01-01"),
+        )
+    }
+
     #[test]
     fn a_variable_with_no_cf_key_is_not_decoded() {
         let raw = no_cf_key();
@@ -452,6 +467,19 @@ mod tests {
     }
 
     #[test]
+    fn a_string_variable_is_not_decoded() {
+        let raw = string_variable();
+        let (decode, out) = decode(&raw);
+        assert_eq!(decode, Decode::None);
+        assert_eq!(
+            decode.data_type(raw.data_type(), raw.attributes()),
+            DataType::Utf8
+        );
+        let values: Vec<Option<&str>> = out.values().as_string::<i32>().iter().collect();
+        assert_eq!(values, vec![Some("a"), Some("-")]);
+    }
+
+    #[test]
     fn data_type_matches_apply_for_each_case() {
         for raw in [
             no_cf_key(),
@@ -468,6 +496,7 @@ mod tests {
             julian_time(),
             noleap_time(),
             nanosecond_time(),
+            string_variable(),
             array(
                 Arc::new(Float32Array::from(vec![1.0f32])),
                 Attributes::new().with("add_offset", vec![1.0f64, 2.0]),
