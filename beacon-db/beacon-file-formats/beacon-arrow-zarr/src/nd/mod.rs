@@ -1,5 +1,6 @@
 //! Zarr v3 stores on the Beacon ND framework (`beacon-nd-dataset`).
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use beacon_nd_dataset::{
@@ -60,7 +61,8 @@ impl NdDataset for ZarrDataset {
 /// Open one leaf group. Reads only metadata.
 ///
 /// The variables are the child arrays, sorted by name. An axis without a name
-/// gets `dim_{i}`, or `{array}_dim_{i}` when `dim_{i}` already has another size.
+/// gets the first free name of `dim_{i}`, `{array}_dim_{i}`, `{array}_dim_{i}_2`, ..
+/// A free name is no name of `dimension_names` and has no other size so far.
 /// An array of an unsupported type is not a variable.
 ///
 /// `Error::Format` when the group does not open. `Error::Invalid` when a
@@ -83,7 +85,7 @@ pub async fn open_group(
         .collect();
     arrays.sort_by(|(a, _), (b, _)| a.cmp(b));
 
-    let mut used = UsedDimensions::default();
+    let mut used = UsedDimensions::new(arrays.iter().map(|(_, array)| array));
     let mut variables: Vec<Arc<dyn NdVariable>> = Vec::with_capacity(arrays.len());
     for (name, array) in arrays {
         let axes = used.axes(&name, &array);
@@ -126,8 +128,9 @@ struct Axis {
 }
 
 /// The dimensions of the variables so far, in first-use order.
-#[derive(Default)]
 struct UsedDimensions {
+    /// Each name in the `dimension_names` of an array of the group.
+    real: HashSet<String>,
     /// The size of each dimension and the array that used it first.
     sizes: IndexMap<String, (usize, String)>,
     /// The names that the reader gave, in first-use order.
@@ -135,7 +138,25 @@ struct UsedDimensions {
 }
 
 impl UsedDimensions {
+    /// No dimension yet. `arrays` gives the real names: each array of the group, also an unsupported one.
+    fn new<'a>(arrays: impl IntoIterator<Item = &'a ZarrArray>) -> Self {
+        let real = arrays
+            .into_iter()
+            .filter_map(|array| array.dimension_names().as_ref())
+            .flatten()
+            .flatten()
+            .cloned()
+            .collect();
+        Self {
+            real,
+            sizes: IndexMap::new(),
+            invented: Vec::new(),
+        }
+    }
+
     /// The axes of the array `name`, with a name for each axis.
+    ///
+    /// A name that the reader gives is never a real name, and has no other size so far.
     fn axes(&self, name: &str, array: &ZarrArray) -> Vec<Axis> {
         let names = array.dimension_names().as_deref().unwrap_or_default();
         array
@@ -151,11 +172,11 @@ impl UsedDimensions {
                         invented: false,
                     };
                 }
-                let shared = format!("dim_{i}");
-                let dimension = match self.sizes.get(&shared) {
-                    Some(&(known, _)) if known != size => format!("{name}_dim_{i}"),
-                    _ => shared,
-                };
+                let dimension = [format!("dim_{i}"), format!("{name}_dim_{i}")]
+                    .into_iter()
+                    .chain((2..).map(|k| format!("{name}_dim_{i}_{k}")))
+                    .find(|candidate| self.is_free(candidate, size))
+                    .expect("only a finite number of names is taken");
                 Axis {
                     name: dimension,
                     size,
@@ -163,6 +184,15 @@ impl UsedDimensions {
                 }
             })
             .collect()
+    }
+
+    /// True when the reader can give `candidate` to an axis of `size`.
+    fn is_free(&self, candidate: &str, size: usize) -> bool {
+        !self.real.contains(candidate)
+            && self
+                .sizes
+                .get(candidate)
+                .is_none_or(|&(known, _)| known == size)
     }
 
     /// Add the axes of the array `name`. `Err(reason)` when an axis has another size.
@@ -300,6 +330,46 @@ mod tests {
             names(dataset.invented_dimensions().to_vec()),
             ["dim_0", "b_dim_0"]
         );
+    }
+
+    #[tokio::test]
+    async fn an_axis_with_no_name_does_not_take_a_real_name() {
+        let store = group().await;
+        array(&store, "a", &[3], &[None]).await;
+        array(&store, "b", &[4], &[Some("dim_0")]).await;
+        let dataset = open(&store).await.unwrap();
+        assert_eq!(axes(&dataset, "a"), ["a_dim_0"]);
+        assert_eq!(axes(&dataset, "b"), ["dim_0"]);
+        assert_eq!(names(dataset.invented_dimensions().to_vec()), ["a_dim_0"]);
+    }
+
+    #[tokio::test]
+    async fn an_axis_with_no_name_after_a_real_name_gets_the_array_name() {
+        let store = group().await;
+        array(&store, "a", &[3], &[Some("dim_0")]).await;
+        array(&store, "b", &[4], &[None]).await;
+        let dataset = open(&store).await.unwrap();
+        assert_eq!(axes(&dataset, "a"), ["dim_0"]);
+        assert_eq!(axes(&dataset, "b"), ["b_dim_0"]);
+        assert_eq!(names(dataset.invented_dimensions().to_vec()), ["b_dim_0"]);
+    }
+
+    #[tokio::test]
+    async fn a_mixed_array_keeps_its_real_name() {
+        let store = group().await;
+        array(&store, "m", &[2, 3], &[None, Some("dim_0")]).await;
+        let dataset = open(&store).await.unwrap();
+        assert_eq!(axes(&dataset, "m"), ["m_dim_0", "dim_0"]);
+    }
+
+    #[tokio::test]
+    async fn an_array_with_a_repeated_axis_name_is_skipped() {
+        let store = group().await;
+        array(&store, "a", &[3], &[Some("y")]).await;
+        array(&store, "r", &[2, 2], &[Some("x"), Some("x")]).await;
+        let dataset = open(&store).await.unwrap();
+        assert_eq!(names(dataset.variable_names()), ["a"]);
+        assert_eq!(dataset.dimensions().names(), ["y"]);
     }
 
     #[tokio::test]
