@@ -117,7 +117,7 @@ mod tests {
     use serde_json::json;
 
     use super::{ZarrOpener, open_leaf, scan_options, zarr_source};
-    use crate::nd::testing::{TestStore, write_array, write_group};
+    use crate::testing::{TestStore, write_array, write_group};
 
     fn meta(path: &str) -> ObjectMeta {
         ObjectMeta {

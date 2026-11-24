@@ -6,6 +6,8 @@ pub mod data_types;
 pub mod datafusion;
 pub mod nd;
 pub mod reader;
+#[cfg(test)]
+pub(crate) mod testing;
 pub mod util;
 pub mod writer;
 

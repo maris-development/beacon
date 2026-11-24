@@ -1,4 +1,4 @@
-//! In-memory Zarr stores for the tests of the ND framework module.
+//! In-memory Zarr stores for the tests of this crate.
 
 use std::sync::Arc;
 
@@ -10,10 +10,9 @@ use zarrs::array::{ArrayBuilder, ArraySubset, DataType, Element, FillValue, data
 use zarrs::group::GroupBuilder;
 use zarrs_object_store::AsyncObjectStore;
 
-use super::ZarrArray;
+use crate::nd::ZarrArray;
 use crate::util::ZarrStorage;
 
-pub(crate) use super::attributes::attributes_of;
 
 /// A writable in-memory Zarr store for tests.
 pub(crate) struct TestStore {

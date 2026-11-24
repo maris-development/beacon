@@ -10,13 +10,11 @@ use indexmap::IndexMap;
 use zarrs::group::Group;
 use zarrs_storage::AsyncReadableListableStorageTraits;
 
-use attributes::attributes_of;
+pub(crate) use attributes::attributes_of;
 use variable::ZarrVariable;
 
 mod attributes;
 pub(crate) mod decode;
-#[cfg(test)]
-pub(crate) mod testing;
 mod variable;
 
 /// A Zarr array over an async store that can read and list.
@@ -235,7 +233,7 @@ mod tests {
     use serde_json::json;
     use zarrs_object_store::AsyncObjectStore;
 
-    use super::testing::{TestStore, write_array, write_group, write_unsupported_array};
+    use crate::testing::{TestStore, write_array, write_group, write_unsupported_array};
     use super::*;
 
     /// An empty group "/g" in a new store.

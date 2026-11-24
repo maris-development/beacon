@@ -278,7 +278,7 @@ mod tests {
     use zarrs::array::{ArrayBuilder, FillValue, data_type};
 
     use super::*;
-    use crate::nd::testing::{TestElement, TestStore, write_array};
+    use crate::testing::{TestElement, TestStore, write_array};
 
     /// A variable "v" with the axes "d0", "d1", .. over one written array.
     async fn variable<T: TestElement>(

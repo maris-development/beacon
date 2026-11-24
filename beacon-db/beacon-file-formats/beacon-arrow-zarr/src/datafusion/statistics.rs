@@ -351,7 +351,7 @@ mod tests {
     use serde_json::json;
 
     use crate::nd::decode::Decode;
-    use crate::nd::testing::attributes_of;
+    use crate::nd::attributes_of;
 
     /// The attributes that a Zarr array with these JSON attributes gets.
     fn attrs(pairs: &[(&str, serde_json::Value)]) -> Attributes {

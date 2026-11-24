@@ -1678,7 +1678,7 @@ mod tests {
         use datafusion::execution::object_store::ObjectStoreUrl;
         use serde_json::json;
 
-        use crate::nd::testing::{TestStore, write_array, write_group};
+        use crate::testing::{TestStore, write_array, write_group};
 
         let store = TestStore::new();
         write_group(&store, "/data/micro.zarr", json!({})).await;
