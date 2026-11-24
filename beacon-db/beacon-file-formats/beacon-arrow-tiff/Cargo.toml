@@ -11,7 +11,6 @@ async-trait = { workspace = true }
 futures = { workspace = true }
 serde = { workspace = true }
 tracing = { workspace = true }
-indexmap = { workspace = true }
 bytes = { workspace = true }
 moka = { workspace = true }
 
@@ -24,11 +23,8 @@ async-tiff = {workspace = true}
 beacon-common = { path = "../../beacon-common" }
 beacon-datafusion-ext = { path = "../../beacon-datafusion-ext" }
 beacon-nd-execution = { path = "../../beacon-nd-execution" }
-beacon-nd-array = { path = "../beacon-nd-array" }
 beacon-nd-dataset = { path = "../../beacon-nd/beacon-nd-dataset" }
 beacon-nd-scan = { path = "../../beacon-nd/beacon-nd-scan" }
-nd-arrow-array = { workspace = true }
-ndarray = {workspace = true}
 
 [dev-dependencies]
 tokio = { workspace = true }
