@@ -206,7 +206,7 @@ async fn column_range(
     let statistics = match file_statistics(dataset, &schema).await {
         Ok(statistics) => statistics,
         Err(error) => {
-            tracing::debug!(column = name, %error, "no Zarr statistics for the column");
+            tracing::warn!(column = name, %error, "no Zarr statistics for the column");
             return None;
         }
     };
@@ -260,9 +260,10 @@ fn attribute_range(attributes: &Attributes, data_type: &DataType) -> Option<Rang
             time_bound(data_type, attributes, low, BoundSide::Lower)?,
             time_bound(data_type, attributes, high, BoundSide::Upper)?,
         )),
+        // The JSON text may round to an f64 inside the stored value. Step out one ulp.
         DataType::Float64 => Some((
-            ScalarValue::Float64(Some(low)),
-            ScalarValue::Float64(Some(high)),
+            ScalarValue::Float64(Some(low.next_down())),
+            ScalarValue::Float64(Some(high.next_up())),
         )),
         // A JSON number is an f64, so narrowing it to f32 may round the min up
         // or the max down by an ulp and tighten the bound. Step each one back
@@ -321,15 +322,15 @@ fn actual_range(attributes: &Attributes) -> Option<(f64, f64)> {
 
 /// The largest magnitude an f64 holds as an exact integer (2^53).
 ///
-/// Past it a JSON number no longer round-trips, so `floor`/`ceil` stop being
-/// the safe direction and no bound is claimed.
+/// At and past it a JSON number may not round-trip: 2^53 + 1 parses to 2^53.
+/// There `floor`/`ceil` stop being the safe direction and no bound is claimed.
 const EXACT_INTEGER: f64 = 9_007_199_254_740_992.0;
 
 /// Floor `low` and ceil `high` into `T`, or `None` if either falls outside it.
 fn int_range<T: TryFrom<i64>>(low: f64, high: f64, min: f64, max: f64) -> Option<(T, T)> {
     let low = low.floor();
     let high = high.ceil();
-    if low < min || high > max || low < -EXACT_INTEGER || high > EXACT_INTEGER {
+    if low < min || high > max || low <= -EXACT_INTEGER || high >= EXACT_INTEGER {
         return None;
     }
     Some((
@@ -378,12 +379,22 @@ mod tests {
             .collect()
     }
 
+    /// The f64 range of `attributes`: the min and the max.
+    fn f64_bounds(attributes: &Attributes) -> (f64, f64) {
+        let range = attribute_range(attributes, &DataType::Float64).unwrap();
+        let (ScalarValue::Float64(Some(min)), ScalarValue::Float64(Some(max))) = range else {
+            panic!("expected an f64 range, got {range:?}");
+        };
+        (min, max)
+    }
+
     #[test]
     fn actual_range_bounds_a_float_array() {
         let a = attrs(&[("actual_range", json!([-1.5, 3.5]))]);
-        let range = attribute_range(&a, &DataType::Float64).unwrap();
-        assert_eq!(range.0, ScalarValue::Float64(Some(-1.5)));
-        assert_eq!(range.1, ScalarValue::Float64(Some(3.5)));
+        let (min, max) = f64_bounds(&a);
+        // The bound contains the stated values and is at most one step wider.
+        assert!(min <= -1.5 && min >= (-1.5f64).next_down(), "min {min}");
+        assert!(max >= 3.5 && max <= 3.5f64.next_up(), "max {max}");
     }
 
     #[test]
@@ -404,6 +415,21 @@ mod tests {
         let range = attribute_range(&a, &DataType::Int32).unwrap();
         assert_eq!(range.0, ScalarValue::Int32(Some(-4)));
         assert_eq!(range.1, ScalarValue::Int32(Some(5)));
+    }
+
+    /// 2^53 + 1 parses to the f64 2^53, so a bound at 2^53 may sit below the data.
+    #[test]
+    fn an_integer_actual_range_at_two_to_the_53_is_unknown() {
+        let high = attrs(&[("actual_range", json!([0, 9007199254740992.0]))]);
+        assert!(attribute_range(&high, &DataType::Int64).is_none());
+
+        let low = attrs(&[("actual_range", json!([-9007199254740992.0, 0]))]);
+        assert!(attribute_range(&low, &DataType::Int64).is_none());
+
+        let exact = attrs(&[("actual_range", json!([0, 9007199254740991.0]))]);
+        let range = attribute_range(&exact, &DataType::Int64).unwrap();
+        assert_eq!(range.0, ScalarValue::Int64(Some(0)));
+        assert_eq!(range.1, ScalarValue::Int64(Some(9_007_199_254_740_991)));
     }
 
     #[test]
@@ -510,9 +536,9 @@ mod tests {
     #[test]
     fn reversed_actual_range_is_read_low_first() {
         let a = attrs(&[("actual_range", json!([9.0, 1.0]))]);
-        let range = attribute_range(&a, &DataType::Float64).unwrap();
-        assert_eq!(range.0, ScalarValue::Float64(Some(1.0)));
-        assert_eq!(range.1, ScalarValue::Float64(Some(9.0)));
+        let (min, max) = f64_bounds(&a);
+        assert!(min <= 1.0 && min >= 1.0f64.next_down(), "min {min}");
+        assert!(max >= 9.0 && max <= 9.0f64.next_up(), "max {max}");
     }
 
     // ── folding leaf groups ──────────────────────────────────────────────
