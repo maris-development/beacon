@@ -1039,7 +1039,6 @@ dependencies = [
  "datafusion 54.1.0",
  "futures",
  "indexmap 2.14.0",
- "nd-arrow-array",
  "object_store 0.13.2",
  "oxcdf",
  "oxcdf-hdf5",
