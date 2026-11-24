@@ -25,7 +25,7 @@ pub(crate) fn dataset_of(
     reader: ObjectStoreAsyncReader,
 ) -> Result<DatasetSchema> {
     let layout = BlockLayout::from_ifd(ifd, endianness)
-        .map_err(|e| Error::format(e.context("Failed to read TIFF block layout")))?;
+        .map_err(|e| Error::format(anyhow::anyhow!("Failed to read TIFF block layout: {e:#}")))?;
     let (height, width) = (layout.image_height, layout.image_width);
 
     let mut variables: Vec<Arc<dyn NdVariable>> = Vec::new();

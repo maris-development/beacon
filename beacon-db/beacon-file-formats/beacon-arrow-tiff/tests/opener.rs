@@ -250,6 +250,35 @@ async fn a_truncated_file_is_an_error() {
     }
 }
 
+/// Set the SHORT value of `tag` in the first IFD of a little-endian classic TIFF.
+fn patch_short_tag(bytes: &mut [u8], tag: u16, value: u16) {
+    assert_eq!(&bytes[..4], b"II*\0", "a little-endian classic TIFF");
+    let ifd = u32::from_le_bytes(bytes[4..8].try_into().unwrap()) as usize;
+    let count = u16::from_le_bytes(bytes[ifd..ifd + 2].try_into().unwrap()) as usize;
+    let entry = (0..count)
+        .map(|i| ifd + 2 + i * 12)
+        .find(|&at| u16::from_le_bytes(bytes[at..at + 2].try_into().unwrap()) == tag)
+        .unwrap_or_else(|| panic!("tag {tag} is not in the first IFD"));
+    bytes[entry + 8..entry + 10].copy_from_slice(&value.to_le_bytes());
+}
+
+/// An unsupported layout gives an error that tells the reason.
+#[tokio::test]
+async fn a_layout_error_tells_the_reason() {
+    const BITS_PER_SAMPLE: u16 = 258;
+    let mut bytes = fixture_bytes("int_predictor_stripped_i32.tif");
+    patch_short_tag(&mut bytes, BITS_PER_SAMPLE, 12);
+    let error = open_bytes(bytes)
+        .await
+        .expect_err("12 bits per sample is not supported");
+    let message = error.to_string();
+    assert!(
+        message.contains("Failed to read TIFF block layout")
+            && message.contains("12 bits per sample"),
+        "unexpected error: {message}"
+    );
+}
+
 #[tokio::test]
 async fn a_missing_object_is_an_error() {
     use beacon_nd_scan::NdFileOpener;
