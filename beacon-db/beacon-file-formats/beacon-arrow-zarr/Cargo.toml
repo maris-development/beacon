@@ -12,7 +12,6 @@ object_store = { workspace = true }
 tokio = { workspace = true }
 arrow = { workspace = true }
 datafusion = { workspace = true }
-ndarray = {workspace = true}
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 serde_json = { workspace = true }
@@ -26,7 +25,6 @@ nd-arrow-array = { workspace = true }
 
 beacon-nd-dataset = { path = "../../beacon-nd/beacon-nd-dataset" }
 beacon-nd-scan = { path = "../../beacon-nd/beacon-nd-scan" }
-beacon-nd-array = { path = "../beacon-nd-array" }
 beacon-datafusion-ext = { path = "../../beacon-datafusion-ext" }
 beacon-nd-execution = { path = "../../beacon-nd-execution" }
 beacon-common = { path = "../../beacon-common" }

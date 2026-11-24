@@ -16,9 +16,9 @@ pub const NOMINAL_GROUP_SIZE: u64 = 1 << 20;
 
 /// The storage a zarr group is opened over.
 ///
-/// The reader is storage independent: everything after [`Group::async_open`] —
-/// schema inference, the leaf-group walk, the `beacon-nd-array` scan and the
-/// predicate pushdown — works the same whatever backs the store. This newtype
+/// The reader is storage independent: everything after [`Group::async_open`]
+/// (schema inference, the leaf-group walk, the ND scan and the predicate
+/// pushdown) works the same whatever backs the store. This newtype
 /// carries that storage through the DataFusion plumbing, which is otherwise
 /// hard-wired to an [`ObjectStore`]. A plain zarr store wraps the session's
 /// object store; an Icechunk repository wraps a repository session instead.

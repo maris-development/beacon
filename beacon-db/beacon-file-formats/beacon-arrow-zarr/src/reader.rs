@@ -1,11 +1,6 @@
-//! High-level zarr reader producing [`AnyDataset`] values.
+//! Schema inference for a Zarr store.
 //!
-//! [`dataset_from_group`] walks a zarr group's child arrays and attributes,
-//! wraps each in a lazy [`NdArrayD`](beacon_nd_array::NdArrayD) backend, and
-//! returns the result as an [`AnyDataset`]. Variable data is read on demand —
-//! only metadata is touched here.
-//!
-//! [`schema_from_group_path`] opens each leaf group through the ND scan instead.
+//! [`schema_from_group_path`] opens each leaf group through the ND scan.
 //!
 //! # Naming conventions
 //! - Each child array becomes a named column.
@@ -16,24 +11,15 @@ use std::sync::Arc;
 
 use arrow::datatypes::SchemaRef;
 use beacon_datafusion_ext::type_widening::{ArrowTypeWidening, LabeledSchema};
-use beacon_nd_array::{
-    NdArrayD,
-    dataset::{AnyDataset, Dataset},
-};
 use beacon_nd_scan::{file_schema, open_for_read};
-use indexmap::IndexMap;
 use object_store::{ObjectMeta, ObjectStore, memory::InMemory, path::Path};
 use zarrs::group::Group;
 use zarrs_storage::AsyncReadableListableStorageTraits;
 
 use crate::{
-    attributes::AttributeValue,
-    compat,
     datafusion::opener::{ZarrOpener, scan_options},
     util::{NOMINAL_GROUP_SIZE, ZarrStorage, group_metadata_key, recursive_groups},
 };
-
-pub use beacon_nd_array::dataset::{project_read_dimensions, project_read_dimensions_or_skip};
 
 /// The merged Arrow schema of every leaf group under `group_path`.
 ///
@@ -101,116 +87,6 @@ pub async fn schema_from_group_path(
     widening
         .merge_schemas(&schemas)
         .map_err(|e| anyhow::anyhow!("Failed to compute super schema for Zarr groups: {e}"))
-}
-
-/// The verbatim JSON attributes of a group's child arrays, keyed by the column
-/// name the array is surfaced under.
-///
-/// [`AttributeValue`] models only the scalars Beacon turns into columns, so it
-/// drops a JSON array such as `actual_range`. Statistics need that value, hence
-/// the untouched map.
-pub type ArrayAttributes = IndexMap<String, serde_json::Map<String, serde_json::Value>>;
-
-/// Build an [`AnyDataset`] from a zarr group.
-///
-/// `projected_names`:
-/// - `None` — include every array and attribute.
-/// - `Some(names)` — include only arrays/attributes whose column name appears
-///   in `names`. This lets the DataFusion source skip building backends for
-///   columns the query won't use.
-pub async fn dataset_from_group(
-    group: &Group<dyn AsyncReadableListableStorageTraits>,
-    projected_names: Option<&[String]>,
-) -> anyhow::Result<AnyDataset> {
-    dataset_and_attributes_from_group(group, projected_names)
-        .await
-        .map(|(dataset, _)| dataset)
-}
-
-/// [`dataset_from_group`], also returning each child array's raw JSON attributes.
-///
-/// One walk of the group serves both: the arrays are listed and their metadata
-/// parsed exactly once, so statistics cost no extra metadata reads.
-pub async fn dataset_and_attributes_from_group(
-    group: &Group<dyn AsyncReadableListableStorageTraits>,
-    projected_names: Option<&[String]>,
-) -> anyhow::Result<(AnyDataset, ArrayAttributes)> {
-    let included =
-        |name: &str| projected_names.map_or(true, |names| names.iter().any(|n| n == name));
-
-    let mut arrays: IndexMap<String, Arc<dyn NdArrayD>> = IndexMap::new();
-    let mut array_attributes: ArrayAttributes = IndexMap::new();
-
-    // ── Global group attributes ──────────────────────────────────────────
-    for (attr_name, attr_value) in group.attributes() {
-        if let Some(av) = AttributeValue::from_json_value(attr_value) {
-            let key = format!(".{attr_name}");
-            if included(&key) {
-                match compat::attribute_to_nd_array(&av) {
-                    Ok(nd) => {
-                        arrays.insert(key, nd);
-                    }
-                    Err(e) => tracing::warn!("Skipping zarr global attribute '{key}': {e}"),
-                }
-            }
-        }
-    }
-
-    let group_path = group.path().as_str().to_string();
-
-    // ── Child arrays and their per-array attributes ──────────────────────
-    let child_arrays = group
-        .async_child_arrays()
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to list zarr child arrays: {e}"))?;
-
-    for array in child_arrays {
-        let array_node_path = array.path().as_str().to_string();
-        let array_name = array_node_path
-            .strip_prefix(&group_path)
-            .unwrap_or(&array_node_path);
-        let array_name = array_name
-            .strip_prefix('/')
-            .unwrap_or(array_name)
-            .to_string();
-
-        array_attributes.insert(array_name.clone(), array.attributes().clone());
-
-        // Parse the array's JSON attributes once: they drive both the
-        // surfaced `{array}.{attr}` columns and CF decoding of the array.
-        let mut attr_map: IndexMap<String, AttributeValue> = IndexMap::new();
-        for (attr_name, attr_value) in array.attributes() {
-            if let Some(av) = AttributeValue::from_json_value(attr_value) {
-                let key = format!("{array_name}.{attr_name}");
-                if included(&key) {
-                    match compat::attribute_to_nd_array(&av) {
-                        Ok(nd) => {
-                            arrays.insert(key, nd);
-                        }
-                        Err(e) => tracing::warn!("Skipping zarr attribute '{key}': {e}"),
-                    }
-                }
-                attr_map.insert(attr_name.clone(), av);
-            }
-        }
-
-        if included(&array_name) {
-            match compat::array_to_nd_array(Arc::new(array), &array_name, &attr_map) {
-                Ok(nd) => {
-                    arrays.insert(array_name, nd);
-                }
-                Err(e) => tracing::warn!("Skipping zarr array '{array_name}': {e}"),
-            }
-        }
-    }
-
-    arrays.sort_keys();
-
-    let dataset = Dataset::new(group_path, arrays).await;
-    let dataset = AnyDataset::try_from_dataset(dataset)
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to wrap zarr group as AnyDataset: {e}"))?;
-    Ok((dataset, array_attributes))
 }
 
 #[cfg(test)]
