@@ -100,7 +100,7 @@ datafusion-spatial = { git = "https://github.com/robinskil/datafusion-spatial.gi
 datafusion-spatial-kernels = { git = "https://github.com/robinskil/datafusion-spatial.git", rev = "92245ff8e2eaad939425993cff7fa9180d471ec1" }
 object_store = { version = "0.13.1", features = ["aws", "gcp", "azure", "http"] }
 
-nd-arrow-array = { git = "https://github.com/robinskil/nd-arrow-array.git", rev = "e1208d59b57e62043ee80aaebae9f9aa721b0491" }
+nd-arrow-array = "0.5.0"
 
 # The atlas container embeds array-format files verbatim, so a change to the
 # crate's bytes is a change to the format Beacon reads. Pin it exactly.

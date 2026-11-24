@@ -7972,7 +7972,8 @@ dependencies = [
 [[package]]
 name = "nd-arrow-array"
 version = "0.5.0"
-source = "git+https://github.com/robinskil/nd-arrow-array.git?rev=e1208d59b57e62043ee80aaebae9f9aa721b0491#e1208d59b57e62043ee80aaebae9f9aa721b0491"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "97f6205303ae82a5bf14e0f889f8d675377d296a6590305111623ed0ef6e54a1"
 dependencies = [
  "arrow",
  "arrow-schema",
