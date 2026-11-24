@@ -579,10 +579,23 @@ limit by hand must make sure of the same.
 
 #### Slices (`slices.rs`)
 
-A port of `scan/slices.rs`, with the name `NdSlice`. The rules do not
+A port of `scan/slices.rs`, with the name `NdSlice`. These rules do not
 change: return `None` with an ordering or `target <= 1`; no slices with a
-row limit; `K = ceil(target / files)` slices per file; never a slice of a
-slice; exactly `target` groups; never a byte range.
+row limit; never a slice of a slice; exactly `target` groups; never a byte
+range.
+
+The slice count uses the size of each file. DataFusion shares the unopened
+entries between sibling partitions, so a partition that ends early takes the
+next entry. This balance needs more entries than partitions.
+
+- The aim is `A = 4 * target` entries of equal size.
+- A file of `size` bytes gets `round(size * A / total)` slices, where `total`
+  is the size of all unsliced files.
+- The count is at least 1 and at most `A`. A count of 1 leaves the file whole.
+- When `total` is 0, each file gets `ceil(A / files)` slices.
+
+The cut comes before the prune and does not use the filter. A slice with no
+kept chunk costs one open of the file and ends.
 
 #### The planner (`planner.rs`)
 

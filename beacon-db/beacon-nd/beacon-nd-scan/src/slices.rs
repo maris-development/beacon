@@ -53,20 +53,39 @@ impl NdSlice {
     }
 }
 
-/// Cut the unsliced entries into slices, when there are fewer of them than `target`.
+/// How many entries the scan aims at for each partition.
+///
+/// Sibling partitions share their unopened entries. More entries than
+/// partitions let a partition that ends early take more work.
+const ENTRIES_PER_PARTITION: usize = 4;
+
+/// Cut the unsliced entries into slices, each file in proportion to its size.
+///
+/// The aim is `ENTRIES_PER_PARTITION * target` entries of equal size. A file
+/// smaller than one such entry stays whole, and no file gets more slices than the aim.
 pub(crate) fn slice_files(entries: Vec<PartitionedFile>, target: usize) -> Vec<PartitionedFile> {
-    let files = entries
-        .iter()
-        .filter(|entry| entry.extension::<NdSlice>().is_none())
-        .count();
-    if files == 0 || files >= target {
+    let unsliced = || {
+        entries
+            .iter()
+            .filter(|entry| entry.extension::<NdSlice>().is_none())
+    };
+    let files = unsliced().count();
+    if files == 0 {
         return entries;
     }
+    let aim = ENTRIES_PER_PARTITION.saturating_mul(target).max(1);
+    let total: u128 = unsliced()
+        .map(|entry| u128::from(entry.object_meta.size))
+        .sum();
 
-    let count = target.div_ceil(files) as u32;
-    let mut sliced = Vec::with_capacity(entries.len() * count as usize);
+    let mut sliced = Vec::with_capacity(entries.len().max(aim));
     for entry in entries {
         if entry.extension::<NdSlice>().is_some() {
+            sliced.push(entry);
+            continue;
+        }
+        let count = slice_count(entry.object_meta.size, total, files, aim);
+        if count == 1 {
             sliced.push(entry);
             continue;
         }
@@ -79,6 +98,16 @@ pub(crate) fn slice_files(entries: Vec<PartitionedFile>, target: usize) -> Vec<P
         }
     }
     sliced
+}
+
+/// The slices of one file of `size` bytes, out of `files` files of `total` bytes.
+fn slice_count(size: u64, total: u128, files: usize, aim: usize) -> u32 {
+    // The share of the file in the aim, to the nearest whole number.
+    let count = (u128::from(size) * aim as u128 + total / 2)
+        .checked_div(total)
+        // No size is known, so each file gets the same count.
+        .unwrap_or(aim.div_ceil(files) as u128);
+    count.clamp(1, aim as u128).min(u128::from(u32::MAX)) as u32
 }
 
 /// Spread `entries` over exactly `target` groups, the largest entry first.
@@ -144,11 +173,23 @@ mod tests {
         assert!(NdSlice::new(3, 4).is_some());
     }
 
-    #[test]
-    fn fewer_files_than_partitions_are_cut_into_slices() {
-        let sliced = slice_files(vec![file("a.nc", 100), file("b.nc", 100)], 8);
+    /// The slice count of each path, in the order of the first entry of the path.
+    fn counts(entries: &[PartitionedFile]) -> Vec<(String, u32)> {
+        let mut counts: Vec<(String, u32)> = Vec::new();
+        for entry in entries {
+            let path = entry.object_meta.location.to_string();
+            if !counts.iter().any(|(seen, _)| *seen == path) {
+                counts.push((path, NdSlice::of(entry).count()));
+            }
+        }
+        counts
+    }
 
-        // K = ceil(8 / 2) = 4 slices for each file.
+    #[test]
+    fn files_of_equal_size_share_the_aim() {
+        let sliced = slice_files(vec![file("a.nc", 100), file("b.nc", 100)], 2);
+
+        // The aim is 4 * 2 = 8 entries: 4 slices for each file.
         assert_eq!(sliced.len(), 8);
         for entry in &sliced {
             assert_eq!(NdSlice::of(entry).count(), 4);
@@ -164,14 +205,65 @@ mod tests {
     }
 
     #[test]
-    fn enough_files_are_not_sliced() {
-        let entries: Vec<PartitionedFile> = (0..8).map(|i| file(&format!("{i}.nc"), 10)).collect();
+    fn a_lone_file_gets_the_full_aim() {
+        let sliced = slice_files(vec![file("a.nc", 100)], 8);
+        assert_eq!(sliced.len(), 32);
+        assert_eq!(counts(&sliced), vec![("a.nc".to_string(), 32)]);
+    }
+
+    #[test]
+    fn enough_files_of_equal_size_are_not_sliced() {
+        let entries: Vec<PartitionedFile> = (0..32).map(|i| file(&format!("{i}.nc"), 10)).collect();
         let kept = slice_files(entries, 4);
-        assert_eq!(kept.len(), 8);
+        assert_eq!(kept.len(), 32);
         assert!(
             kept.iter()
                 .all(|entry| entry.extension::<NdSlice>().is_none())
         );
+    }
+
+    #[test]
+    fn a_large_file_among_many_small_files_is_sliced() {
+        let mut entries = vec![file("big.nc", 50_000)];
+        entries.extend((0..40).map(|i| file(&format!("s{i}.nc"), 100)));
+
+        let sliced = slice_files(entries, 8);
+
+        // The aim is 32 entries of 1687.5 bytes: round(50000 / 1687.5) = 30.
+        let counts = counts(&sliced);
+        assert_eq!(counts[0], ("big.nc".to_string(), 30));
+        assert!(counts[1..].iter().all(|(_, count)| *count == 1));
+        assert_eq!(sliced.len(), 30 + 40);
+        assert!(
+            sliced
+                .iter()
+                .filter(|entry| entry.object_meta.location.as_ref() != "big.nc")
+                .all(|entry| entry.extension::<NdSlice>().is_none())
+        );
+    }
+
+    #[test]
+    fn files_of_unknown_size_get_the_same_count() {
+        let sliced = slice_files(vec![file("a.nc", 0), file("b.nc", 0), file("c.nc", 0)], 2);
+
+        // The aim is 8 entries: ceil(8 / 3) = 3 slices for each file.
+        assert_eq!(sliced.len(), 9);
+        assert!(sliced.iter().all(|entry| NdSlice::of(entry).count() == 3));
+    }
+
+    #[test]
+    fn an_empty_file_among_sized_files_stays_whole() {
+        let sliced = slice_files(vec![file("a.nc", 100), file("empty.nc", 0)], 2);
+        assert_eq!(
+            counts(&sliced),
+            vec![("a.nc".to_string(), 8), ("empty.nc".to_string(), 1)]
+        );
+    }
+
+    #[test]
+    fn a_huge_size_does_not_overflow() {
+        let sliced = slice_files(vec![file("a.nc", u64::MAX), file("b.nc", u64::MAX)], 2);
+        assert_eq!(sliced.len(), 8);
     }
 
     #[test]

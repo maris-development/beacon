@@ -144,8 +144,8 @@ impl FileSource for NdSource {
         true
     }
 
-    /// Spread the files over `target_partitions` groups, and slice a file when
-    /// there are fewer files than partitions. A file is never cut by byte range.
+    /// Slice each file in proportion to its size, and spread the entries over
+    /// `target_partitions` groups. A file is never cut by byte range.
     fn repartitioned(
         &self,
         target_partitions: usize,
@@ -298,16 +298,19 @@ mod tests {
                 .all(|group| group.files().len() == 3)
         );
 
-        // One file on four partitions: four slices of it.
+        // One file on four partitions: sixteen slices of it, four in each group.
         let one = source
             .repartitioned(4, 0, None, &config_of(&source, 1).build())
             .unwrap()
             .expect("the scan repartitions");
         assert_eq!(one.file_groups.len(), 4);
         for group in &one.file_groups {
-            assert_eq!(group.files().len(), 1);
-            assert!(group.files()[0].range.is_none());
-            assert_eq!(group.files()[0].object_meta.location.as_ref(), "f0.nc");
+            assert_eq!(group.files().len(), 4);
+            for entry in group.files() {
+                assert!(entry.range.is_none());
+                assert_eq!(entry.object_meta.location.as_ref(), "f0.nc");
+                assert_eq!(NdSlice::of(entry).count(), 16);
+            }
         }
 
         // One partition: the scan stays as it is planned.
