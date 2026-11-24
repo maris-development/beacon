@@ -61,6 +61,8 @@ use crate::oxcdf_reader::compat;
 /// Open a NetCDF object from `store` and return its contents as an
 /// [`AnyDataset`].
 ///
+/// No scan calls it: the NetCDF scan uses [`crate::nd`]. It stays until HDF5 moves to the ND framework.
+///
 /// The reader fetches byte ranges. It never copies the whole object, so an
 /// object in S3, GCS or Azure needs no local file.
 ///
@@ -82,6 +84,8 @@ pub async fn open_dataset(store: Arc<dyn ObjectStore>, path: Path) -> anyhow::Re
 ///
 /// This is [`open_dataset`] for an object that a listing already found. The
 /// size comes from `object`, so the open sends no `head` request.
+///
+/// No scan calls it: the NetCDF scan uses [`crate::nd`]. It stays until HDF5 moves to the ND framework.
 ///
 /// # Errors
 ///
@@ -109,6 +113,7 @@ pub async fn open_file(
     AsyncNetcdfFile::open_with(Arc::new(source), OpenOptions::remote()).await
 }
 
+/// The dataset of [`open_dataset`] and [`open_object`]; it stays until HDF5 moves to the ND framework.
 async fn dataset_from_file(name: String, file: Arc<AsyncNetcdfFile>) -> anyhow::Result<AnyDataset> {
     let phony = PhonyDimensions::of_file(&file);
     let arrays = read_arrays(&file)?;
@@ -125,6 +130,8 @@ async fn dataset_from_file(name: String, file: Arc<AsyncNetcdfFile>) -> anyhow::
 ///
 /// The map is sorted by key, so iteration order is stable. This is the
 /// lower-level building block behind [`open_dataset`].
+///
+/// No scan calls it. It is the test oracle of `nd/tests.rs` until HDF5 moves to the ND framework.
 ///
 /// # Errors
 ///

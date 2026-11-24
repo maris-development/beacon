@@ -365,6 +365,47 @@ mod tests {
     }
 
     #[test]
+    fn each_missing_value_becomes_null() {
+        let raw = array(
+            Arc::new(Int16Array::from(vec![1, -8, 3, -7])),
+            Attributes::new().with("missing_value", vec![-8i16, -7]),
+        );
+        let (decode, out) = decode(&raw);
+        assert_eq!(decode, Decode::Cf);
+        let values: Vec<Option<i16>> = out.values().as_primitive::<Int16Type>().iter().collect();
+        assert_eq!(values, vec![Some(1), None, Some(3), None]);
+    }
+
+    #[test]
+    fn a_valid_min_alone_nulls_the_values_below_it() {
+        let raw = array(
+            Arc::new(Int16Array::from(vec![-1, 0, 500])),
+            Attributes::new().with("valid_min", 0i16),
+        );
+        let (decode, out) = decode(&raw);
+        assert_eq!(decode, Decode::Cf);
+        let values: Vec<Option<i16>> = out.values().as_primitive::<Int16Type>().iter().collect();
+        assert_eq!(values, vec![None, Some(0), Some(500)]);
+    }
+
+    #[test]
+    fn singular_abbreviated_and_capital_units_decode() {
+        for (units, expected) in [
+            ("hour since 2000-01-01", micros(2000, 1, 1, 2)),
+            ("h since 2000-01-01", micros(2000, 1, 1, 2)),
+            ("Days since 2000-01-01", micros(2000, 1, 3, 0)),
+        ] {
+            let raw = array(
+                Arc::new(Float64Array::from(vec![2.0])),
+                Attributes::new().with("units", units),
+            );
+            let (decode, out) = decode(&raw);
+            assert_eq!(decode, Decode::Time, "{units}");
+            assert_eq!(stamps(&out), vec![Some(expected)], "{units}");
+        }
+    }
+
+    #[test]
     fn a_fill_of_another_type_is_applied() {
         let (_, out) = decode(&fill_of_another_type());
         let values: Vec<Option<i16>> = out.values().as_primitive::<Int16Type>().iter().collect();

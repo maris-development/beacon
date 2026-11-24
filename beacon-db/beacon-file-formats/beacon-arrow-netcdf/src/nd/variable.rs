@@ -36,6 +36,8 @@ enum StringForm {
 #[derive(Debug)]
 pub(crate) struct NetcdfVariable {
     file: Arc<AsyncNetcdfFile>,
+    /// The name of the dataset: the file location that the opener knows.
+    dataset: Arc<str>,
     /// The path that binds the variable in `file`.
     path: String,
     info: VariableInfo,
@@ -51,6 +53,7 @@ pub(crate) struct NetcdfVariable {
 impl NetcdfVariable {
     /// `Err` with a reason when the rules cannot model the variable.
     pub(crate) fn try_new(
+        dataset: Arc<str>,
         file: Arc<AsyncNetcdfFile>,
         variable: &AsyncVariable<'_>,
         phony: &PhonyDimensions,
@@ -106,6 +109,7 @@ impl NetcdfVariable {
             .with_attributes(attributes);
         Ok(NetcdfVariable {
             file,
+            dataset,
             path: variable.path.clone(),
             info,
             stored,
@@ -323,7 +327,7 @@ impl NdVariable for NetcdfVariable {
         let decoded = self.decode.apply(raw)?;
         if decoded.data_type() != self.data_type() {
             return Err(Error::Invalid {
-                dataset: self.path.clone(),
+                dataset: self.dataset.to_string(),
                 reason: format!(
                     "the variable '{}' reads as {}, not as its type {}",
                     self.name(),
@@ -379,7 +383,8 @@ mod tests {
         let phony = PhonyDimensions::of_file(file);
         let sizes = dimension_sizes(file, &phony);
         let variable = file.variable(name).unwrap();
-        NetcdfVariable::try_new(file.clone(), &variable, &phony, &sizes).unwrap()
+        NetcdfVariable::try_new(Arc::from("cf.nc"), file.clone(), &variable, &phony, &sizes)
+            .unwrap()
     }
 
     /// Write one file with `variables` and open the variable `name`.
@@ -623,8 +628,14 @@ mod tests {
         let sizes = dimension_sizes(&file, &phony);
         let mut count = 0;
         for variable in file.variables() {
-            let variable = NetcdfVariable::try_new(file.clone(), &variable, &phony, &sizes)
-                .unwrap_or_else(|reason| panic!("{}: {reason}", variable.name));
+            let variable = NetcdfVariable::try_new(
+                Arc::from(GRIDDED_FILE),
+                file.clone(),
+                &variable,
+                &phony,
+                &sizes,
+            )
+            .unwrap_or_else(|reason| panic!("{}: {reason}", variable.name));
             let read = variable
                 .read(&Region::full(variable.dimensions()))
                 .await

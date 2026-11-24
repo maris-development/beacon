@@ -491,6 +491,57 @@ async fn a_large_file_splits_and_returns_the_same_rows() {
     assert_eq!(summary(&split).await, whole_summary);
 }
 
+/// A count over a file that several partitions read counts every row once.
+///
+/// A partition that read the file whole would count it once per partition,
+/// and the answer would grow with `target_partitions`. No error shows that,
+/// so the count is the guard. The one-partition session gives the count to match.
+#[tokio::test]
+async fn a_shared_count_counts_every_row_once() {
+    const QUERY: &str = r#"SELECT count("V0") FROM one"#;
+    let (_dir, file) = write_large_netcdf();
+
+    let whole = one_partition_session();
+    register(&whole, "one", &file).await;
+
+    let count = async |ctx: &SessionContext| {
+        let batches = ctx.sql(QUERY).await.unwrap().collect().await.unwrap();
+        batches[0].column(0).as_primitive::<Int64Type>().value(0)
+    };
+
+    let expected = count(&whole).await;
+    assert_eq!(
+        expected, LARGE_ROWS as i64,
+        "the fixture holds one row per value of each column"
+    );
+
+    // A file read once per partition gives a multiple of the truth.
+    for target_partitions in [2_usize, 4, 7] {
+        let split = session(target_partitions, 8192);
+        register(&split, "one", &file).await;
+
+        // The count proves nothing if the scan under it is not sliced.
+        let plan = split
+            .sql(QUERY)
+            .await
+            .unwrap()
+            .create_physical_plan()
+            .await
+            .unwrap();
+        assert_eq!(
+            scan_partitions(&plan),
+            target_partitions,
+            "the count scan must be sliced:\n{}",
+            datafusion::physical_plan::displayable(plan.as_ref()).indent(false)
+        );
+        assert_eq!(
+            count(&split).await,
+            expected,
+            "target_partitions={target_partitions}: the sliced file is counted once"
+        );
+    }
+}
+
 /// A pruned scan counts what the coordinate itself says it should.
 ///
 /// The scan skips chunks whose coordinates cannot meet the predicate, so a
@@ -1114,6 +1165,8 @@ async fn a_time_filter_keeps_the_same_rows_with_the_prune() {
     assert_eq!(values(&with_prune), values(&without_prune));
     // Chunks of 2 rows: the chunk of days 0 and 1 is skipped.
     assert_eq!(scan_counter(&plan, "chunks_pruned"), 1);
+    // The plain scan reports its chunks, so its prune count of 0 is a real count.
+    assert!(scan_counter(&plain_plan, "chunks_read") > 0);
     assert_eq!(scan_counter(&plain_plan, "chunks_pruned"), 0);
 }
 

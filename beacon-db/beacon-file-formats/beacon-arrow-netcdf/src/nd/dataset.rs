@@ -19,15 +19,22 @@ pub(crate) fn dataset_of(name: &str, file: &Arc<AsyncNetcdfFile>) -> Result<Data
         .root()
         .variables
         .iter()
-        .filter_map(|info| file.variable(&info.path))
+        .filter_map(|info| {
+            let variable = file.variable(&info.path);
+            if variable.is_none() {
+                tracing::debug!(variable = %info.name, "skip a NetCDF variable that the file cannot bind");
+            }
+            variable
+        })
         .collect();
     variables.sort_by(|a, b| a.name.cmp(&b.name));
 
+    let dataset: Arc<str> = Arc::from(name);
     let sizes = dimension_sizes(file, &phony, &variables);
     let modeled = modeled(variables.iter().map(|variable| {
         (
             variable.name.clone(),
-            NetcdfVariable::try_new(file.clone(), variable, &phony, &sizes),
+            NetcdfVariable::try_new(dataset.clone(), file.clone(), variable, &phony, &sizes),
         )
     }))
     .into_iter()

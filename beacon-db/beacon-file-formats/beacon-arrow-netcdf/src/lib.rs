@@ -7,13 +7,17 @@
 //!
 //! # Reading and writing
 //!
-//! [`oxcdf_reader`] reads through [`oxcdf`], a pure-Rust reader. It holds no
+//! [`nd`] reads NetCDF through the ND framework (`beacon-nd-dataset`,
+//! `beacon-nd-scan`). The NetCDF scan uses it. [`oxcdf_reader`] stays for the
+//! `beacon-arrow-hdf5` crate, which uses its file open and its variable
+//! conversion. Both read through [`oxcdf`], a pure-Rust reader. It holds no
 //! global lock and reads through `object_store`, so scans run in parallel and
 //! S3, GCS and Azure need no local copy. [`writer`] and the N-dimensional sink
 //! write through [`oxcdf`].
 //!
 //! # Key modules
-//! - [`oxcdf_reader`]: high-level NetCDF -> Arrow reader API.
+//! - [`nd`]: NetCDF on the ND framework, with the CF decode.
+//! - [`oxcdf_reader`]: the older NetCDF -> ND array reader, for HDF5.
 //! - [`writer`]: high-level Arrow -> NetCDF writer API.
 //! - [`encoders`]: pluggable conversion components for the writer.
 //! - [`cf_time`]: CF time conversion.
