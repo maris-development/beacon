@@ -49,7 +49,7 @@ pub(crate) struct NetcdfVariable {
 }
 
 impl NetcdfVariable {
-    /// `None` and a reason when the rules cannot model the variable.
+    /// `Err` with a reason when the rules cannot model the variable.
     pub(crate) fn try_new(
         file: Arc<AsyncNetcdfFile>,
         variable: &AsyncVariable<'_>,
@@ -319,10 +319,8 @@ impl NdVariable for NetcdfVariable {
         )?;
         let raw = NdArrowArray::try_new(values, dimensions)?
             .with_attributes(self.info.attributes.clone());
-        let decoded = self.decode.apply(raw).map_err(|error| Error::Read {
-            variable: self.name().to_string(),
-            error: Box::new(error),
-        })?;
+        // The chunk reader names the variable in a read error.
+        let decoded = self.decode.apply(raw)?;
         if decoded.data_type() != self.data_type() {
             return Err(Error::Invalid {
                 dataset: self.path.clone(),
@@ -347,7 +345,7 @@ mod tests {
         Array, ArrayRef, AsArray, BinaryArray, FixedSizeBinaryArray, Float64Array, Int16Array,
     };
     use arrow::datatypes::{DataType, Float64Type};
-    use beacon_nd_dataset::{Error, NdVariable, Region};
+    use beacon_nd_dataset::{ChunkGrid, ChunkReader, DatasetSchema, Error, NdVariable, Region};
     use indexmap::IndexMap;
     use nd_arrow_array::Attributes;
     use oxcdf::{AsyncNetcdfFile, AttributeValue};
@@ -551,15 +549,58 @@ mod tests {
         .await;
         // The oxcdf writer refuses an empty attribute, and the kernel fails on one.
         temp.info.attributes = Attributes::new().with("scale_factor", Vec::<f32>::new());
+        let dimensions = temp.dimensions().clone();
+        let dataset = DatasetSchema::try_new(
+            "cf.nc",
+            dimensions,
+            vec![Arc::new(temp) as Arc<dyn NdVariable>],
+        )
+        .unwrap();
+        let grid = ChunkGrid::try_new(&dataset, 8192).unwrap();
+        let reader = ChunkReader::try_new(&dataset, grid).unwrap();
 
-        let error = temp
-            .read(&Region::full(temp.dimensions()))
-            .await
-            .unwrap_err();
-        assert!(
-            matches!(error, Error::Read { ref variable, .. } if variable == "temp"),
-            "{error:?}"
-        );
+        let error = reader.read(&reader.grid().chunk(0)).await.unwrap_err();
+        let message = error.to_string();
+        let Error::Read { variable, error } = error else {
+            panic!("{error:?}");
+        };
+        assert_eq!(variable, "temp");
+        assert!(matches!(*error, Error::Nd(_)), "{error:?}");
+        assert_eq!(message.matches("'temp'").count(), 1, "{message}");
+    }
+
+    #[tokio::test]
+    async fn a_short_two_dimensional_variable_pads_in_c_order() {
+        let v = written(
+            &[("t", None), ("x", Some(2))],
+            vec![
+                TestVariable {
+                    name: "a",
+                    dimensions: vec!["t"],
+                    values: Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+                    attributes: vec![],
+                },
+                TestVariable {
+                    name: "v",
+                    dimensions: vec!["t", "x"],
+                    values: Arc::new(Float64Array::from(vec![10.0, 11.0, 20.0, 21.0])),
+                    attributes: vec![],
+                },
+            ],
+            "v",
+        )
+        .await;
+        assert_eq!(v.dimensions().shape(), vec![3, 2]);
+
+        let read = v.read(&Region::full(v.dimensions())).await.unwrap();
+        assert_eq!(read.dims().shape(), vec![3, 2]);
+        let values = read.values().as_primitive::<Float64Type>();
+        let expected = [Some(10.0), Some(11.0), Some(20.0), Some(21.0), None, None];
+        assert_eq!(values, &Float64Array::from(expected.to_vec()));
+
+        let corner = v.read(&Region::new(vec![1, 1], vec![2, 1])).await.unwrap();
+        let values = corner.values().as_primitive::<Float64Type>();
+        assert_eq!(values, &Float64Array::from(vec![Some(21.0), None]));
     }
 
     #[tokio::test]
