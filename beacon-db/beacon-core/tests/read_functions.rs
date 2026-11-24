@@ -137,7 +137,7 @@ async fn read_netcdf_scans_the_fixture() {
 #[tokio::test(flavor = "multi_thread")]
 async fn read_hdf5_reads_a_netcdf4_file() {
     let rt = seeded("read-hdf5-netcdf4").await;
-    let rows = scalar_i64(&rt.sql("SELECT count(*) FROM read_hdf5('wod.h5')").await);
+    let rows = scalar_i64(&rt.sql("SELECT count(lat) FROM read_hdf5('wod.h5')").await);
     assert!(rows > 0, "the WOD CTD fixture should yield rows");
 }
 
@@ -216,10 +216,7 @@ async fn read_hdf5_defaults_to_the_payload_grid_of_an_instrument_file() {
     let rt = seeded("read-hdf5-instrument").await;
 
     assert_eq!(
-        scalar_i64(
-            &rt.sql("SELECT count(*) FROM read_hdf5('instrument.h5')")
-                .await
-        ),
+        total_rows(&rt.sql("SELECT * FROM read_hdf5('instrument.h5')").await),
         24,
         "6 samples x 4 channels"
     );

@@ -34,7 +34,14 @@ pub(crate) fn dataset_of(name: &str, file: &Arc<AsyncNetcdfFile>) -> Result<Data
     let modeled = modeled(variables.iter().map(|variable| {
         (
             variable.name.clone(),
-            NetcdfVariable::try_new(dataset.clone(), file.clone(), variable, &phony, &sizes),
+            NetcdfVariable::try_new(
+                Arc::from(variable.name.as_str()),
+                dataset.clone(),
+                file.clone(),
+                variable,
+                &phony,
+                &sizes,
+            ),
         )
     }))
     .into_iter()

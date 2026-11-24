@@ -250,3 +250,75 @@ async fn the_read_type_is_the_declared_type() {
     }
     assert!(count > 1);
 }
+
+/// Build the `NetcdfVariable` of `path` under the column name `column`.
+async fn built(
+    path: &Path,
+    variable: &str,
+    column: &str,
+) -> beacon_arrow_netcdf::nd::NetcdfVariable {
+    use beacon_arrow_netcdf::dimensions::PhonyDimensions;
+    use beacon_arrow_netcdf::nd::{stored_length, NetcdfVariable};
+
+    let (store, object) = local_object(path).await;
+    let file = Arc::new(
+        beacon_arrow_netcdf::oxcdf_reader::open_file(store, &object)
+            .await
+            .unwrap(),
+    );
+    let phony = PhonyDimensions::of_file(&file);
+    let bound = file.variable(variable).unwrap();
+    let sizes: indexmap::IndexMap<String, usize> = phony
+        .apply(&bound.dimensions)
+        .into_iter()
+        .zip(stored_length(&bound))
+        .collect();
+    NetcdfVariable::try_new(
+        Arc::from(column),
+        Arc::from("test"),
+        file.clone(),
+        &bound,
+        &phony,
+        &sizes,
+    )
+    .unwrap()
+}
+
+fn write_raw_temp(dir: &Path) -> std::path::PathBuf {
+    let path = dir.join("raw.nc");
+    write_cf_netcdf(
+        &path,
+        &[("x", Some(4))],
+        vec![TestVariable {
+            name: "temp",
+            dimensions: vec!["x"],
+            values: Arc::new(Int16Array::from(vec![10, 20, 30, 40])),
+            attributes: vec![],
+        }],
+    );
+    path
+}
+
+#[tokio::test]
+async fn a_variable_takes_the_column_name_it_is_given() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_raw_temp(dir.path());
+    let temp = built(&path, "temp", "grp/temp").await;
+    assert_eq!(temp.name(), "grp/temp");
+
+    let read = temp.read(&Region::full(temp.dimensions())).await.unwrap();
+    let values = read.values().as_primitive::<arrow::datatypes::Int16Type>();
+    assert_eq!(values, &Int16Array::from(vec![10, 20, 30, 40]));
+}
+
+#[tokio::test]
+async fn a_scale_factor_decodes_the_values() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_raw_temp(dir.path());
+    let temp = built(&path, "temp", "temp").await.with_scale_factor(0.5);
+    assert_eq!(temp.data_type(), &DataType::Float64);
+
+    let read = temp.read(&Region::full(temp.dimensions())).await.unwrap();
+    let values = read.values().as_primitive::<Float64Type>();
+    assert_eq!(values, &Float64Array::from(vec![5.0, 10.0, 15.0, 20.0]));
+}
