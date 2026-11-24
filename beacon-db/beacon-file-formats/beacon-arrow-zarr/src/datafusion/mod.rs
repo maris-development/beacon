@@ -802,6 +802,43 @@ mod tests {
         assert_eq!(entries, 16, "four slices of the one group per partition");
     }
 
+    // ── Partitioned tables ─────────────────────────────────────────────
+
+    /// A scan with a table partition column is refused, and the error names it.
+    #[tokio::test]
+    async fn a_partition_column_is_not_implemented() {
+        use arrow::datatypes::{DataType, Field};
+        use beacon_nd_scan::encoded_table_schema;
+        use datafusion::datasource::file_format::FileFormat;
+        use datafusion::datasource::listing::PartitionedFile;
+        use datafusion::datasource::physical_plan::{FileScanConfigBuilder, FileSource};
+        use datafusion::error::DataFusionError;
+        use datafusion::execution::object_store::ObjectStoreUrl;
+
+        let table_schema = encoded_table_schema(&arrow::datatypes::Schema::empty())
+            .with_table_partition_cols(vec![Arc::new(Field::new("year", DataType::Utf8, false))]);
+        let source = super::zarr_source(table_schema, None, false, None);
+        let config = FileScanConfigBuilder::new(
+            ObjectStoreUrl::local_filesystem(),
+            Arc::new(source) as Arc<dyn FileSource>,
+        )
+        .with_file(PartitionedFile::new(
+            "year=2020/store.zarr/zarr.json",
+            super::NOMINAL_GROUP_SIZE,
+        ))
+        .build();
+
+        let ctx = SessionContext::new();
+        let result = ZarrFormat::default()
+            .create_physical_plan(&ctx.state(), config)
+            .await;
+        let Err(DataFusionError::NotImplemented(message)) = result else {
+            panic!("a partition column must be NotImplemented, got {result:?}");
+        };
+        assert!(message.contains("Zarr"), "{message}");
+        assert!(message.contains("PARTITIONED BY year"), "{message}");
+    }
+
     /// One group scans in several partitions and returns the same rows it
     /// returns in one.
     ///
