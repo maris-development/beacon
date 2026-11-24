@@ -26,8 +26,7 @@ use crate::{
 /// Take the `_FillValue` attribute only when it is stored as the variable's own
 /// type.
 ///
-/// A netCDF writer gives `_FillValue` the type of its variable. Both readers
-/// keep to that rule, so both null out the same cells.
+/// A netCDF writer gives `_FillValue` the type of its variable.
 macro_rules! fill_value_of {
     ($variable:expr, $variant:ident) => {
         match $variable.attribute("_FillValue").map(|a| &a.value) {
@@ -186,8 +185,7 @@ pub fn variable_to_nd_array_packed(
         .and_then(|a| a.value.as_text())
         .and_then(|units| parse_time_units(units, calendar.as_deref()));
 
-    // CF `scale_factor` / `add_offset` packing. A missing factor defaults to
-    // the identity, as it does on the netcdf-c path.
+    // CF `scale_factor` / `add_offset` packing. A missing factor defaults to the identity.
     let scale = variable
         .attribute("scale_factor")
         .and_then(|a| attribute_as_f64(&a.value));

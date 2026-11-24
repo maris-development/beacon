@@ -274,7 +274,7 @@ An ARGO file therefore holds a range for `JULD`, `LATITUDE` and `LONGITUDE`. It 
 prunes no file of such a table.
 
 A CF ragged file follows the same rule. Beacon ranges the instance variables, and skips the
-observation variables.
+observation variables. Only the HDF5 format reads a ragged file.
 :::
 
 :::info Zarr reads only its coordinates
