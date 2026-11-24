@@ -111,7 +111,7 @@ fn accepts_extension(extensions: &FormatExtensions, format: &str, extension: &st
 
 /// The formats that refuse `PARTITIONED BY`. The crawler reads their `key=value/`
 /// directories as plain sub-directories.
-const FORMATS_WITHOUT_PARTITIONS: [&str; 1] = ["nc"];
+const FORMATS_WITHOUT_PARTITIONS: [&str; 2] = ["nc", "tiff"];
 
 /// Whether a table of `format` can have partition columns.
 fn supports_partitions(format: &str) -> bool {
@@ -526,6 +526,19 @@ mod tests {
         assert!(cands[0].partition_cols.is_empty());
         assert!(cands[0].recursive);
         assert_eq!(cands[0].location(), "obs/**/*.nc");
+    }
+
+    #[test]
+    fn a_tiff_collection_gets_no_partition_columns() {
+        let datasets = vec![
+            ds("dem/year=2023/a.tiff", "tiff"),
+            ds("dem/year=2024/b.tiff", "tiff"),
+        ];
+        let (cands, _) = group_into_tables(&datasets, &def(), &extensions());
+        assert_eq!(cands.len(), 1);
+        assert_eq!(cands[0].base, "dem");
+        assert!(cands[0].partition_cols.is_empty());
+        assert_eq!(cands[0].location(), "dem/**/*.tiff");
     }
 
     #[test]
