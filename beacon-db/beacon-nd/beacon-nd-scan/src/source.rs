@@ -23,7 +23,7 @@ use crate::metrics::ScanMetrics;
 use crate::opener::{NdFileOpener, NdScanOptions};
 use crate::planner::{NdMorselizer, ReadPlan, ScanContext};
 use crate::schema::logical_projection;
-use crate::slices::{slice_files, spread_files};
+use crate::slices::{largest_first, slice_files, spread_files};
 
 /// The table schema of an ND scan: the `beacon.nd` encoded form of the logical `file_schema`.
 ///
@@ -171,6 +171,11 @@ impl FileSource for NdSource {
         let mut config = config.clone();
         config.file_groups = spread_files(entries, target_partitions);
         Ok(Some(config))
+    }
+
+    /// Put the largest entries at the front of the queue that sibling partitions share.
+    fn reorder_files(&self, files: Vec<PartitionedFile>) -> Vec<PartitionedFile> {
+        largest_first(files)
     }
 
     fn metrics(&self) -> &ExecutionPlanMetricsSet {
@@ -347,6 +352,23 @@ mod tests {
                 .is_none(),
             "an ordered scan must keep its single group"
         );
+    }
+
+    #[test]
+    fn the_shared_queue_starts_with_the_largest_file() {
+        let files = vec![
+            PartitionedFile::new("small.nc", 10),
+            PartitionedFile::new("large.nc", 1000),
+            PartitionedFile::new("medium.nc", 100),
+        ];
+
+        let order: Vec<String> = source("V0")
+            .reorder_files(files)
+            .iter()
+            .map(|entry| entry.object_meta.location.to_string())
+            .collect();
+
+        assert_eq!(order, ["large.nc", "medium.nc", "small.nc"]);
     }
 
     #[test]

@@ -594,6 +594,11 @@ next entry. This balance needs more entries than partitions.
 - The count is at least 1 and at most `A`. A count of 1 leaves the file whole.
 - When `total` is 0, each file gets `ceil(A / files)` slices.
 
+`NdSource::reorder_files` sorts the shared queue by weight, the largest entry
+first. The weight of an entry is the size of its file divided by its slice
+count. The large entries start first and the small entries fill the gaps at
+the end.
+
 The cut comes before the prune and does not use the filter. A slice with no
 kept chunk costs one open of the file and ends.
 

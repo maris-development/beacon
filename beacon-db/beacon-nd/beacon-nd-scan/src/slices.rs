@@ -110,9 +110,18 @@ fn slice_count(size: u64, total: u128, files: usize, aim: usize) -> u32 {
     count.clamp(1, aim as u128).min(u128::from(u32::MAX)) as u32
 }
 
-/// Spread `entries` over exactly `target` groups, the largest entry first.
-pub(crate) fn spread_files(mut entries: Vec<PartitionedFile>, target: usize) -> Vec<FileGroup> {
+/// Sort `entries` by weight, the largest entry first. Equal entries keep their order.
+///
+/// Sibling partitions take their work from the front of one queue. The large
+/// entries start first, and the small entries fill the gaps at the end.
+pub(crate) fn largest_first(mut entries: Vec<PartitionedFile>) -> Vec<PartitionedFile> {
     entries.sort_by_key(|entry| std::cmp::Reverse(weight(entry)));
+    entries
+}
+
+/// Spread `entries` over exactly `target` groups, the largest entry first.
+pub(crate) fn spread_files(entries: Vec<PartitionedFile>, target: usize) -> Vec<FileGroup> {
+    let entries = largest_first(entries);
 
     let mut groups: Vec<(u64, Vec<PartitionedFile>)> = vec![(0, Vec::new()); target.max(1)];
     for entry in entries {
@@ -276,6 +285,36 @@ mod tests {
     #[test]
     fn no_entry_gives_no_slice() {
         assert!(slice_files(vec![], 8).is_empty());
+    }
+
+    #[test]
+    fn the_largest_entry_comes_first_and_the_slices_keep_their_order() {
+        let entries = slice_files(
+            vec![file("s1.nc", 100), file("big.nc", 1500), file("s2.nc", 100)],
+            1,
+        );
+
+        let order: Vec<(String, u32)> = largest_first(entries)
+            .iter()
+            .map(|entry| {
+                (
+                    entry.object_meta.location.to_string(),
+                    NdSlice::of(entry).index(),
+                )
+            })
+            .collect();
+
+        // The aim is 4 entries of 425 bytes: big.nc gets 4 slices of 375 bytes.
+        let expected = [
+            ("big.nc", 0),
+            ("big.nc", 1),
+            ("big.nc", 2),
+            ("big.nc", 3),
+            ("s1.nc", 0),
+            ("s2.nc", 0),
+        ]
+        .map(|(path, index)| (path.to_string(), index));
+        assert_eq!(order, expected);
     }
 
     #[test]
