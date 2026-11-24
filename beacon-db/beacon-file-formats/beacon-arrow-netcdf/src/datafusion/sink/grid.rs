@@ -948,7 +948,25 @@ mod tests {
     use arrow::array::{Float64Array, Int32Array};
     use arrow::datatypes::{Field, Schema};
 
-    use crate::datafusion::sink::tests::test_sink_config;
+    use datafusion::datasource::physical_plan::{FileGroup, FileOutputMode};
+    use datafusion::execution::object_store::ObjectStoreUrl;
+    use datafusion::logical_expr::dml::InsertOp;
+
+    /// Build a minimal [`FileSinkConfig`] for testing.
+    fn test_sink_config(schema: SchemaRef) -> FileSinkConfig {
+        FileSinkConfig {
+            original_url: String::new(),
+            object_store_url: ObjectStoreUrl::local_filesystem(),
+            file_group: FileGroup::default(),
+            table_paths: vec![],
+            output_schema: schema,
+            table_partition_cols: vec![],
+            insert_op: InsertOp::Append,
+            keep_partition_by_columns: false,
+            file_extension: "nc".to_string(),
+            file_output_mode: FileOutputMode::SingleFile,
+        }
+    }
 
     /// Build a [`ColumnValueMap`] from sorted vecs for two i32 dimension columns.
     fn two_i32_dims(

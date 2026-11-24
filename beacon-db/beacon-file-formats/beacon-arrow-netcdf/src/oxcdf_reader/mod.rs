@@ -23,5 +23,3 @@ pub mod compat;
 pub mod reader;
 
 pub use reader::{open_dataset, open_file, open_object, read_arrays};
-#[cfg(test)]
-mod time_fill_tests;

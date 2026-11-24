@@ -26,8 +26,6 @@
 mod flat;
 mod grid;
 mod scratch;
-#[cfg(test)]
-mod tests;
 
 pub use flat::NetCDFSink;
 pub use grid::NetCDFNdSink;

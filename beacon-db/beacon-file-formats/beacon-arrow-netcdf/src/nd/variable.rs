@@ -342,27 +342,25 @@ impl NdVariable for NetcdfVariable {
 
 #[cfg(test)]
 mod tests {
+    //! The tests that need the private fields of [`NetcdfVariable`]. The others are in `tests/variable.rs`.
+
     use std::path::Path;
     use std::sync::Arc;
 
-    use arrow::array::{
-        Array, ArrayRef, AsArray, BinaryArray, FixedSizeBinaryArray, Float64Array, Int16Array,
-    };
-    use arrow::datatypes::{DataType, Float64Type};
-    use beacon_nd_dataset::{ChunkGrid, ChunkReader, DatasetSchema, Error, NdVariable, Region};
+    use beacon_nd_dataset::{ChunkGrid, ChunkReader, DatasetSchema, Error, NdVariable};
     use indexmap::IndexMap;
     use nd_arrow_array::Attributes;
+    use object_store::{local::LocalFileSystem, ObjectStore, ObjectStoreExt};
     use oxcdf::{AsyncNetcdfFile, AttributeValue};
 
     use super::NetcdfVariable;
-    use crate::datafusion::test_util::{
-        local_object, test_file, write_cf_netcdf, TestVariable, GRIDDED_FILE,
-    };
     use crate::dimensions::PhonyDimensions;
     use crate::oxcdf_reader::open_file;
 
     async fn open(path: &Path) -> Arc<AsyncNetcdfFile> {
-        let (store, object) = local_object(path).await;
+        let store: Arc<dyn ObjectStore> = Arc::new(LocalFileSystem::new());
+        let location = object_store::path::Path::from_absolute_path(path).unwrap();
+        let object = store.head(&location).await.unwrap();
         Arc::new(open_file(store, &object).await.unwrap())
     }
 
@@ -387,171 +385,23 @@ mod tests {
             .unwrap()
     }
 
-    /// Write one file with `variables` and open the variable `name`.
-    async fn written(
-        dimensions: &[(&str, Option<usize>)],
-        variables: Vec<TestVariable>,
-        name: &str,
-    ) -> NetcdfVariable {
+    /// Write `temp`, two `i16` values with a `scale_factor`, and open it as a variable.
+    async fn scaled_temp() -> NetcdfVariable {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("cf.nc");
-        write_cf_netcdf(&path, dimensions, variables);
-        variable(&open(&path).await, name)
-    }
-
-    fn strings(array: &ArrayRef) -> Vec<Option<&str>> {
-        array.as_string::<i32>().iter().collect()
-    }
-
-    #[tokio::test]
-    async fn a_region_reads_the_decoded_values() {
-        let temp = written(
-            &[("x", Some(4))],
-            vec![TestVariable {
-                name: "temp",
-                dimensions: vec!["x"],
-                values: Arc::new(Int16Array::from(vec![10, 20, 30, 40])),
-                attributes: vec![("scale_factor", AttributeValue::Double(0.5))],
-            }],
-            "temp",
-        )
-        .await;
-        assert_eq!(temp.data_type(), &DataType::Float64);
-
-        let read = temp.read(&Region::new(vec![1], vec![2])).await.unwrap();
-        assert_eq!(read.dims().shape(), vec![2]);
-        let values = read.values().as_primitive::<Float64Type>();
-        assert_eq!(values, &Float64Array::from(vec![10.0, 15.0]));
-    }
-
-    #[tokio::test]
-    async fn a_rank_zero_variable_reads_one_value() {
-        let depth = written(
-            &[],
-            vec![TestVariable {
-                name: "depth",
-                dimensions: vec![],
-                values: Arc::new(Float64Array::from(vec![7.5])),
-                attributes: vec![],
-            }],
-            "depth",
-        )
-        .await;
-        assert_eq!(depth.dimensions().rank(), 0);
-
-        let read = depth.read(&Region::full(depth.dimensions())).await.unwrap();
-        assert_eq!(read.dims().rank(), 0);
-        let values = read.values().as_primitive::<Float64Type>();
-        assert_eq!(values, &Float64Array::from(vec![7.5]));
-    }
-
-    #[tokio::test]
-    async fn a_fixed_char_array_reads_one_string_per_row() {
-        let rows = FixedSizeBinaryArray::try_from_iter([b"ab\0\0", b"cd  "].into_iter()).unwrap();
-        let name = written(
-            &[("n", Some(2)), ("strlen", Some(4))],
-            vec![TestVariable {
-                name: "name",
-                dimensions: vec!["n", "strlen"],
-                values: Arc::new(rows),
-                attributes: vec![],
-            }],
-            "name",
-        )
-        .await;
-        assert_eq!(name.data_type(), &DataType::Utf8);
-        assert_eq!(name.dimensions().names(), vec!["n"]);
-        assert_eq!(name.chunk_shape().map(<[usize]>::len), Some(1));
-
-        let read = name.read(&Region::full(name.dimensions())).await.unwrap();
-        assert_eq!(strings(read.values()), [Some("ab"), Some("cd")]);
-    }
-
-    #[tokio::test]
-    async fn a_char_array_without_a_length_axis_reads_bytes() {
-        let flag = written(
-            &[("n", Some(3))],
-            vec![TestVariable {
-                name: "flag",
-                dimensions: vec!["n"],
-                values: Arc::new(BinaryArray::from_vec(vec![b"x", b"y", b"z"])),
-                attributes: vec![],
-            }],
-            "flag",
-        )
-        .await;
-        assert_eq!(flag.dimensions().names(), vec!["n"]);
-
-        let read = flag.read(&Region::new(vec![1], vec![2])).await.unwrap();
-        assert_eq!(strings(read.values()), [Some("y"), Some("z")]);
-    }
-
-    #[tokio::test]
-    async fn a_string_fill_becomes_null() {
-        // The oxcdf writer refuses a fill on a netCDF string variable, so a char variable carries it.
-        let code = written(
-            &[("n", Some(3))],
-            vec![TestVariable {
-                name: "code",
-                dimensions: vec!["n"],
-                values: Arc::new(BinaryArray::from_vec(vec![b"a", b"-", b"b"])),
-                attributes: vec![("_FillValue", AttributeValue::Str("-".to_string()))],
-            }],
-            "code",
-        )
-        .await;
-
-        let read = code.read(&Region::full(code.dimensions())).await.unwrap();
-        assert_eq!(strings(read.values()), [Some("a"), None, Some("b")]);
-    }
-
-    #[tokio::test]
-    async fn a_short_variable_pads_with_nulls() {
-        let b = written(
-            &[("t", None)],
-            vec![
-                TestVariable {
-                    name: "a",
-                    dimensions: vec!["t"],
-                    values: Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
-                    attributes: vec![],
-                },
-                TestVariable {
-                    name: "b",
-                    dimensions: vec!["t"],
-                    values: Arc::new(Float64Array::from(vec![4.0, 5.0])),
-                    attributes: vec![],
-                },
-            ],
-            "b",
-        )
-        .await;
-        assert_eq!(b.dimensions().shape(), vec![3]);
-
-        let read = b.read(&Region::new(vec![0], vec![3])).await.unwrap();
-        let values = read.values().as_primitive::<Float64Type>();
-        assert_eq!(
-            values,
-            &Float64Array::from(vec![Some(4.0), Some(5.0), None])
-        );
-
-        let past = b.read(&Region::new(vec![2], vec![1])).await.unwrap();
-        assert_eq!(past.values().null_count(), 1);
+        let mut file = oxcdf::create(&path).expect("create the file");
+        file.add_dimension("x", 2).unwrap();
+        let mut temp = file.add_variable::<i16>("temp", &["x"]).unwrap();
+        temp.put_attribute("scale_factor", AttributeValue::Double(0.5))
+            .unwrap();
+        temp.put_values(&[1i16, 2], ..).unwrap();
+        file.close().expect("close the file");
+        variable(&open(&path).await, "temp")
     }
 
     #[tokio::test]
     async fn a_decode_error_names_the_variable() {
-        let mut temp = written(
-            &[("x", Some(2))],
-            vec![TestVariable {
-                name: "temp",
-                dimensions: vec!["x"],
-                values: Arc::new(Int16Array::from(vec![1, 2])),
-                attributes: vec![("scale_factor", AttributeValue::Double(0.5))],
-            }],
-            "temp",
-        )
-        .await;
+        let mut temp = scaled_temp().await;
         // The oxcdf writer refuses an empty attribute, and the kernel fails on one.
         temp.info.attributes = Attributes::new().with("scale_factor", Vec::<f32>::new());
         let dimensions = temp.dimensions().clone();
@@ -572,83 +422,5 @@ mod tests {
         assert_eq!(variable, "temp");
         assert!(matches!(*error, Error::Nd(_)), "{error:?}");
         assert_eq!(message.matches("'temp'").count(), 1, "{message}");
-    }
-
-    #[tokio::test]
-    async fn a_short_two_dimensional_variable_pads_in_c_order() {
-        let v = written(
-            &[("t", None), ("x", Some(2))],
-            vec![
-                TestVariable {
-                    name: "a",
-                    dimensions: vec!["t"],
-                    values: Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
-                    attributes: vec![],
-                },
-                TestVariable {
-                    name: "v",
-                    dimensions: vec!["t", "x"],
-                    values: Arc::new(Float64Array::from(vec![10.0, 11.0, 20.0, 21.0])),
-                    attributes: vec![],
-                },
-            ],
-            "v",
-        )
-        .await;
-        assert_eq!(v.dimensions().shape(), vec![3, 2]);
-
-        let read = v.read(&Region::full(v.dimensions())).await.unwrap();
-        assert_eq!(read.dims().shape(), vec![3, 2]);
-        let values = read.values().as_primitive::<Float64Type>();
-        let expected = [Some(10.0), Some(11.0), Some(20.0), Some(21.0), None, None];
-        assert_eq!(values, &Float64Array::from(expected.to_vec()));
-
-        let corner = v.read(&Region::new(vec![1, 1], vec![2, 1])).await.unwrap();
-        let values = corner.values().as_primitive::<Float64Type>();
-        assert_eq!(values, &Float64Array::from(vec![Some(21.0), None]));
-    }
-
-    #[tokio::test]
-    async fn a_region_outside_the_variable_is_invalid() {
-        let file = open(&test_file(GRIDDED_FILE)).await;
-        let temp = variable(&file, "analysed_sst");
-        let mut shape = temp.dimensions().shape();
-        shape[0] += 1;
-        let error = temp
-            .read(&Region::new(vec![0; shape.len()], shape))
-            .await
-            .unwrap_err();
-        assert!(matches!(error, Error::InvalidRegion { .. }), "{error:?}");
-    }
-
-    #[tokio::test]
-    async fn the_read_type_is_the_declared_type() {
-        let file = open(&test_file(GRIDDED_FILE)).await;
-        let phony = PhonyDimensions::of_file(&file);
-        let sizes = dimension_sizes(&file, &phony);
-        let mut count = 0;
-        for variable in file.variables() {
-            let variable = NetcdfVariable::try_new(
-                Arc::from(GRIDDED_FILE),
-                file.clone(),
-                &variable,
-                &phony,
-                &sizes,
-            )
-            .unwrap_or_else(|reason| panic!("{}: {reason}", variable.name));
-            let read = variable
-                .read(&Region::full(variable.dimensions()))
-                .await
-                .unwrap();
-            assert_eq!(
-                read.data_type(),
-                variable.data_type(),
-                "{}",
-                variable.name()
-            );
-            assert_eq!(read.dims().names(), variable.dimensions().names());
-            count += 1;
-        }
-        assert!(count > 1);
     }
 }

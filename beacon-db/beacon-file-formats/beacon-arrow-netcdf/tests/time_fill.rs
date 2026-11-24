@@ -8,6 +8,7 @@
 use std::sync::Arc;
 
 use arrow::array::{Array, TimestampNanosecondArray};
+use beacon_arrow_netcdf::oxcdf_reader::read_arrays;
 use beacon_nd_array::{
     arrow::array::ndarray_to_arrow_array, datatypes::TimestampNanosecond, NdArray, NdArrayD,
 };
@@ -48,7 +49,7 @@ async fn time_array() -> Arc<dyn NdArrayD> {
             .await
             .expect("open the fixture"),
     );
-    super::read_arrays(&file)
+    read_arrays(&file)
         .expect("read the fixture")
         .swap_remove("time")
         .expect("the fixture holds a 'time' variable")

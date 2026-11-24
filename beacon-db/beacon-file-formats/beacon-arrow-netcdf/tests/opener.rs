@@ -8,12 +8,14 @@ use beacon_nd_array::arrow::array::ndarray_to_arrow_array;
 use beacon_nd_dataset::{validate, ChunkGrid, Error, NdDataset, Region};
 use beacon_nd_scan::NdFileOpener;
 
-use super::NetcdfOpener;
-use crate::datafusion::test_util::{
+use beacon_arrow_netcdf::nd::NetcdfOpener;
+use beacon_arrow_netcdf::oxcdf_reader::{open_file, read_arrays};
+
+mod common;
+use common::{
     local_object, open_test_file, test_file, write_cf_netcdf, write_regular_netcdf, TestVariable,
     GRIDDED_FILE, WOD_FILE,
 };
-use crate::oxcdf_reader::{open_file, read_arrays};
 
 async fn open(path: &Path) -> beacon_nd_dataset::Result<Arc<dyn NdDataset>> {
     let (store, object) = local_object(path).await;

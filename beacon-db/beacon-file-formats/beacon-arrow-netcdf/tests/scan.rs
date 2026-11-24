@@ -17,9 +17,11 @@ use datafusion::prelude::SessionContext;
 use futures::StreamExt;
 use object_store::{memory::InMemory, path::Path, ObjectStore, ObjectStoreExt, PutPayload};
 
-use crate::datafusion::options::NetcdfOptions;
-use crate::datafusion::test_util::*;
-use crate::datafusion::NetcdfFormat;
+use beacon_arrow_netcdf::datafusion::options::NetcdfOptions;
+use beacon_arrow_netcdf::datafusion::NetcdfFormat;
+
+mod common;
+use common::*;
 
 /// The scan at the bottom of `plan`.
 fn leaf_scan(plan: &Arc<dyn ExecutionPlan>) -> Arc<dyn ExecutionPlan> {
@@ -275,12 +277,12 @@ fn write_large_netcdf() -> (tempfile::TempDir, PathBuf) {
 /// A file with more chunks than the oxcdf chunk cache holds (512) reads every row.
 #[tokio::test]
 async fn a_file_with_more_chunks_than_the_cache_holds_reads_every_row() {
-    use crate::datafusion::options::NetcdfWriterOptions;
-    use crate::encoders::default::DefaultEncoder;
-    use crate::writer::ArrowRecordBatchWriter;
     use arrow::array::{ArrayRef, Float64Array};
     use arrow::datatypes::{DataType, Field, Schema};
     use arrow::record_batch::RecordBatch;
+    use beacon_arrow_netcdf::datafusion::options::NetcdfWriterOptions;
+    use beacon_arrow_netcdf::encoders::default::DefaultEncoder;
+    use beacon_arrow_netcdf::writer::ArrowRecordBatchWriter;
 
     // 5 columns of 400 chunks each: 2,000 chunks in one file.
     let (columns, rows, chunk_rows) = (5, 40_000, 100);
@@ -453,9 +455,8 @@ async fn a_null_string_reads_back_as_an_empty_string() {
     use arrow::array::{AsArray, StringArray};
     use arrow::datatypes::{DataType, Field, Schema};
     use arrow::record_batch::RecordBatch;
-
-    use crate::encoders::default::DefaultEncoder;
-    use crate::writer::ArrowRecordBatchWriter;
+    use beacon_arrow_netcdf::encoders::default::DefaultEncoder;
+    use beacon_arrow_netcdf::writer::ArrowRecordBatchWriter;
 
     let dir = tempfile::tempdir().expect("a temp directory");
     let path = dir.path().join("names.nc");

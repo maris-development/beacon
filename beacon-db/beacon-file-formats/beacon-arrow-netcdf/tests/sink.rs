@@ -12,11 +12,11 @@ use datafusion::execution::{SendableRecordBatchStream, TaskContext};
 use datafusion::logical_expr::dml::InsertOp;
 use object_store::path::Path as ObjectPath;
 
-use super::{NetCDFNdSink, NetCDFSink};
-use crate::datafusion::options::NetcdfWriterOptions;
+use beacon_arrow_netcdf::datafusion::options::NetcdfWriterOptions;
+use beacon_arrow_netcdf::datafusion::sink::{NetCDFNdSink, NetCDFSink};
 
 /// Build a minimal [`FileSinkConfig`] for testing.
-pub(super) fn test_sink_config(schema: SchemaRef) -> FileSinkConfig {
+fn test_sink_config(schema: SchemaRef) -> FileSinkConfig {
     FileSinkConfig {
         original_url: String::new(),
         object_store_url: ObjectStoreUrl::local_filesystem(),
@@ -348,7 +348,7 @@ async fn a_failed_flat_write_puts_nothing_in_the_store() {
     )
     .unwrap();
     let options = NetcdfWriterOptions {
-        combine_attrs: Some(crate::attributes::CombineAttrs::Identical),
+        combine_attrs: Some(beacon_arrow_netcdf::attributes::CombineAttrs::Identical),
         ..Default::default()
     };
     let config = store_sink_config(schema.clone(), "local://out/", "a/b.nc");

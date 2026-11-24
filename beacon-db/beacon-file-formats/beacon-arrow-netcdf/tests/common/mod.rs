@@ -1,5 +1,8 @@
 //! Helpers that the NetCDF tests share.
 
+// Each test binary uses only some of the helpers.
+#![allow(dead_code)]
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -19,11 +22,11 @@ use datafusion::prelude::{SessionConfig, SessionContext};
 use object_store::{local::LocalFileSystem, ObjectMeta, ObjectStore, ObjectStoreExt};
 use oxcdf::{AttributeValue, DType, Extent, Extents};
 
-use super::options::NetcdfOptions;
-use super::NetcdfFormat;
-use crate::encoders::default::DefaultEncoder;
-use crate::nd::NetcdfOpener;
-use crate::writer::ArrowRecordBatchWriter;
+use beacon_arrow_netcdf::datafusion::options::NetcdfOptions;
+use beacon_arrow_netcdf::datafusion::NetcdfFormat;
+use beacon_arrow_netcdf::encoders::default::DefaultEncoder;
+use beacon_arrow_netcdf::nd::NetcdfOpener;
+use beacon_arrow_netcdf::writer::ArrowRecordBatchWriter;
 
 /// A regular gridded file: `analysed_sst` on `[time, lat, lon]`, with `lat` in 2 native chunks.
 pub(crate) const GRIDDED_FILE: &str = "gridded-example.nc";

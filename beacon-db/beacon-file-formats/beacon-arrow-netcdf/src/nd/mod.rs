@@ -7,6 +7,3 @@ mod opener;
 mod variable;
 
 pub use opener::NetcdfOpener;
-
-#[cfg(test)]
-mod tests;
