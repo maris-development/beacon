@@ -34,6 +34,7 @@ mod table_function;
 
 pub use config::{Hdf5Config, Hdf5Convention, ReadOptions};
 pub use format::{Hdf5Format, Hdf5FormatFactory};
+pub use nd::Hdf5Opener;
 pub use open::{fetch_schema, open_dataset};
 pub use source::Hdf5Source;
 pub use table_function::ReadHdf5Func;

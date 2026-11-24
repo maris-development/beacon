@@ -51,6 +51,14 @@ def nested_groups() -> None:
         )
 
 
+def list_attribute() -> None:
+    """A file with one attribute of two values and one of one value."""
+    with h5py.File(os.path.join(HERE, "list-attribute.h5"), "w") as f:
+        f.attrs["bounds"] = np.array([1.0, 2.0])
+        f.attrs["version"] = np.int64(1)
+        f.create_dataset("value", data=np.array([1, 2, 3], dtype=np.int32))
+
+
 def compound() -> None:
     """A file holding one compound dataset.
 
@@ -219,4 +227,8 @@ if __name__ == "__main__":
     compound()
     instrument()
     optodas()
-    print("wrote nested-groups.h5, compound.h5, instrument.h5 and optodas.h5")
+    list_attribute()
+    print(
+        "wrote nested-groups.h5, compound.h5, instrument.h5, optodas.h5 "
+        "and list-attribute.h5"
+    )
