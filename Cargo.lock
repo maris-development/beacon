@@ -1176,6 +1176,7 @@ dependencies = [
  "beacon-nd-execution",
  "beacon-nd-scan",
  "bytes",
+ "chrono",
  "datafusion 54.1.0",
  "futures",
  "hifitime",

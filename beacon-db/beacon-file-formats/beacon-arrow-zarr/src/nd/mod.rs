@@ -3,3 +3,6 @@
 // A later change reads Zarr variables through these functions.
 #[allow(dead_code)]
 mod attributes;
+// A later change decodes Zarr variables through this module.
+#[allow(dead_code)]
+mod decode;
