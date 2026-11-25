@@ -6,7 +6,7 @@ edition = "2024"
 rust-version.workspace = true
 
 [dependencies]
-beacon-arrow-zarr = { path = "../beacon-arrow-zarr" }
+beacon-arrow-zarr = { path = "../../beacon-file-formats/beacon-arrow-zarr" }
 beacon-common = { path = "../../beacon-common" }
 beacon-datafusion-ext = { path = "../../beacon-datafusion-ext" }
 

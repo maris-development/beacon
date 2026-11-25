@@ -9,7 +9,7 @@ The data is in `data/beacon_test.csv`. Each row tests one edge case of the filte
 Run this command from the repository root:
 
 ```sh
-docker compose -f beacon-db/beacon-file-formats/beacon-erddap/docker/docker-compose.yml up -d
+docker compose -f beacon-db/beacon-table-providers/beacon-erddap/docker/docker-compose.yml up -d
 ```
 
 The server uses host port 8089 on 127.0.0.1 only.
@@ -47,7 +47,7 @@ Add `--nocapture` to see each query, its counts and its request URL.
 ## Stop the server
 
 ```sh
-docker compose -f beacon-db/beacon-file-formats/beacon-erddap/docker/docker-compose.yml down
+docker compose -f beacon-db/beacon-table-providers/beacon-erddap/docker/docker-compose.yml down
 ```
 
 ## Notes
