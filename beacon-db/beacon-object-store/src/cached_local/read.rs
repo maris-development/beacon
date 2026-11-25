@@ -53,7 +53,8 @@ fn read_error(path: &Path, e: io::Error) -> object_store::Error {
 
 /// An error of the read function.
 enum ReadError {
-    /// A positional read error that a new handle of the same path can fix.
+    /// A positional read error that a new handle of the same path can fix: a gone file,
+    /// or a file shorter than its cached size.
     Stale(io::Error),
     /// Any other error, in its final form.
     Store(object_store::Error),
@@ -314,7 +315,9 @@ impl Reader {
             Err(e)
                 if matches!(
                     e.kind(),
-                    io::ErrorKind::NotFound | io::ErrorKind::StaleNetworkFileHandle
+                    io::ErrorKind::NotFound
+                        | io::ErrorKind::StaleNetworkFileHandle
+                        | io::ErrorKind::UnexpectedEof
                 ) =>
             {
                 Err(ReadError::Stale(e))

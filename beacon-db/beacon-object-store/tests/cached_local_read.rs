@@ -266,3 +266,42 @@ async fn deleted_file_read_is_not_found() {
     let err = ours.get_range(&loc, 0..10).await.unwrap_err();
     assert_eq!(kind(&err), "NotFound", "{err}");
 }
+
+#[tokio::test]
+async fn file_that_shrank_reads_as_stock() {
+    for block_size in [0, 4096] {
+        let (dir, ours, stock) = temp_store(CachedLocalOptions {
+            block_size,
+            revalidate_after: Duration::from_secs(3600),
+            ..Default::default()
+        });
+        let data = random_file(dir.path(), "a.bin", 10_000);
+        let loc = Path::from("a.bin");
+        // The cached handle keeps the old size of 10000 bytes.
+        ours.get_range(&loc, 0..10).await.unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(dir.path().join("a.bin"))
+            .unwrap()
+            .set_len(5_000)
+            .unwrap();
+
+        let got = ours.get_range(&loc, 4_000..6_000).await;
+        assert_eq!(
+            outcome(got),
+            outcome(stock.get_range(&loc, 4_000..6_000).await),
+            "block_size {block_size}"
+        );
+        assert_eq!(
+            &ours.get_range(&loc, 4_000..4_500).await.unwrap()[..],
+            &data[4_000..4_500]
+        );
+        let ours_ranges = ours.get_ranges(&loc, &[100..200, 4_900..5_100]).await;
+        let stock_ranges = stock.get_ranges(&loc, &[100..200, 4_900..5_100]).await;
+        assert_eq!(
+            ours_ranges.map_err(|e| kind(&e)),
+            stock_ranges.map_err(|e| kind(&e)),
+            "block_size {block_size}"
+        );
+    }
+}
