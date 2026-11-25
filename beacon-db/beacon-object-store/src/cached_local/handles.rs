@@ -127,6 +127,11 @@ impl HandleCache {
             .await
     }
 
+    /// Returns the cached handle of `path`, with no open and no version check.
+    pub async fn peek(&self, path: &Path) -> Option<Arc<OpenFile>> {
+        self.cache.get(path).await
+    }
+
     /// Drops the cached handle of `path` and runs `on_change`.
     pub async fn invalidate(&self, path: &Path) {
         self.cache.invalidate(path).await;
