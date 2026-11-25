@@ -90,6 +90,53 @@ files into one array store with statistics. Beacon can then drop whole datasets 
 arrays that you select. This is much faster than a scan of the original NetCDF files.
 :::
 
+## CF decode
+
+Beacon applies the CF conventions of a variable when it reads the variable. The table shows the
+result for each case.
+
+| Case | Result |
+|---|---|
+| CF time variable (`units = "<unit> since <date>"`) | `Timestamp(Microsecond)` |
+| Packed values (`scale_factor`, `add_offset`) | The float type of `scale_factor` or `add_offset`, for example `Float32`. Else `Float64`. |
+| `_FillValue` | The values become null. A `_FillValue` of another type gets the type of the variable first. |
+| `missing_value`, with one or more values | The values become null. |
+| `valid_min`, `valid_max`, `valid_range` | The values outside the range become null. |
+| Packed time (`scale_factor` or `add_offset`, with `units = "<unit> since <date>"`) | A timestamp |
+| NaN or infinite time value | Null |
+| Time unit in singular form, as an abbreviation or with capitals (`hour`, `h`, `Days`) | A timestamp |
+| A time of day or a zone in the reference date (`hours since 2000-01-01 12:00`) | Beacon applies it. |
+| Calendar `standard`, `gregorian`, `proleptic_gregorian` or `julian` | A timestamp |
+| Calendar `noleap`, `360_day` or a different calendar | Numbers |
+| Time unit `nanoseconds` (`nanoseconds since <date>`) | Numbers in the stored type, for example `Int64` |
+| A variable shorter than its unlimited dimension | The cells past the length of the variable are null. |
+
+Beacon's NetCDF writer writes the unit `nanoseconds since 1970-01-01` for a column of type
+`Timestamp(Nanosecond)`. Beacon reads such a file back as `Int64` numbers.
+
+### Refresh a NetCDF table
+
+An external table keeps the column types that Beacon stored when you created the table. Beacon casts
+the new types to the stored types. A cast from microseconds to nanoseconds is exact for a time in
+the years 1677 to 2262. Beacon gives null for a time outside these years.
+
+A packed time column is different. A stored `Float64` column gets the microseconds since 1970, not
+the original values. Beacon gives no error. Refresh each NetCDF table with a packed time column.
+Use [`REFRESH`](/docs/2.1.0-rc3/sql/create-external-table#refresh), or drop the table and create it
+again. The table then gets the new types. `REFRESH` changes the types only if Beacon inferred the
+schema of the table.
+
+```sql
+REFRESH argo
+```
+
+## Limits
+
+- A query must read at least one column of the file. `COUNT(*)` gives an error. Use `COUNT(column)` with a column on the full grid.
+- Beacon leaves out a variable that it cannot model. An example is a variable with a repeated dimension, such as `m(x, x)`. A different example is a variable with a type that is not atomic. Beacon also leaves out the attribute columns of the variable, such as `m.units`.
+- `PARTITIONED BY` is not supported. A query on a partitioned NetCDF table gives an error.
+- Ragged files, for example World Ocean Database files, are not supported. Read such a file with the [HDF5 format](/docs/2.1.0-rc3/formats/hdf5): `read_hdf5` or `STORED AS HDF5`.
+
 ## Write a NetCDF output
 
 Beacon writes NetCDF with a pure-Rust writer. Beacon writes the file to a temporary file in the

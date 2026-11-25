@@ -94,13 +94,13 @@ def test_the_schema_is_reported(con):
     assert relation.types == ["Float64", "Float64"]
 
 
-def test_count_star(con):
-    assert con.sql("SELECT count(*) AS n FROM read_hdf5('plain.h5')").fetchall() == [(ROWS,)]
+def test_count_of_a_column(con):
+    assert con.sql("SELECT count(temperature) AS n FROM read_hdf5('plain.h5')").fetchall() == [(ROWS,)]
 
 
 def test_a_filter_and_an_aggregate(con):
     got = con.sql(
-        "SELECT count(*) n, max(temperature) hi FROM read_hdf5('plain.h5') WHERE depth >= 100"
+        "SELECT count(depth) n, max(temperature) hi FROM read_hdf5('plain.h5') WHERE depth >= 100"
     ).fetchall()[0]
     assert got == (ROWS - 10, 4.0 + (ROWS - 1) * 0.5)
 
@@ -155,7 +155,7 @@ def test_a_variable_length_string_reads_whole(con):
 
 
 def test_a_glob_reads_every_file(con):
-    assert con.sql("SELECT count(*) AS n FROM read_hdf5('parts/*.h5')").fetchall() == [(10,)]
+    assert con.sql("SELECT count(depth) AS n FROM read_hdf5('parts/*.h5')").fetchall() == [(10,)]
 
 
 # --- external tables and a restart --------------------------------------------
@@ -163,13 +163,13 @@ def test_a_glob_reads_every_file(con):
 
 def test_an_external_table_reads(con):
     con.execute("CREATE EXTERNAL TABLE obs STORED AS HDF5 LOCATION 'plain.h5'")
-    assert con.sql("SELECT count(*) AS n FROM obs").fetchall() == [(ROWS,)]
+    assert con.sql("SELECT count(depth) AS n FROM obs").fetchall() == [(ROWS,)]
     assert "obs" in con.list_tables()
 
 
 def test_the_h5_alias_also_works(con):
     con.execute("CREATE EXTERNAL TABLE obs_h5 STORED AS H5 LOCATION 'plain.h5'")
-    assert con.sql("SELECT count(*) AS n FROM obs_h5").fetchall() == [(ROWS,)]
+    assert con.sql("SELECT count(depth) AS n FROM obs_h5").fetchall() == [(ROWS,)]
 
 
 def test_an_external_table_survives_a_restart(datasets, tmp_path):
@@ -180,7 +180,7 @@ def test_an_external_table_survives_a_restart(datasets, tmp_path):
         con.execute("CREATE EXTERNAL TABLE grouped STORED AS HDF5 LOCATION 'groups.h5'")
 
     with beacondb.connect(path, datasets=str(datasets)) as con:
-        assert con.sql("SELECT count(*) AS n FROM obs").fetchall() == [(ROWS,)]
+        assert con.sql("SELECT count(depth) AS n FROM obs").fetchall() == [(ROWS,)]
         assert {"obs", "grouped"} <= set(con.list_tables())
         rows = con.sql("SELECT depth, temperature FROM obs ORDER BY depth LIMIT 1").fetchall()
         assert rows == [(0.0, 4.0)]

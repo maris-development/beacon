@@ -1,8 +1,8 @@
-//! DataFusion column statistics derived from NetCDF datasets.
+//! DataFusion column statistics derived from ND-array datasets.
 //!
-//! [`generate_statistics`] is the entry point.  It opens a NetCDF file and
-//! computes per-column min/max statistics for the columns listed in
-//! `table_schema`, dispatching to a regular-dataset or ragged-dataset path.
+//! [`statistics_for_dataset`] computes per-column min/max statistics for the
+//! columns listed in `table_schema`, dispatching to a regular-dataset or
+//! ragged-dataset path.
 //!
 //! Statistics are used by DataFusion's query optimizer for predicate pushdown
 //! and partition pruning.  Arrays for which a range cannot be determined
@@ -18,34 +18,11 @@ use datafusion::{
     scalar::ScalarValue,
 };
 
-use crate::datafusion::reader::NetcdfInput;
-
 // ─── Public entry point ─────────────────────────────────────────────────────
-
-/// Open the NetCDF object `input` names and return DataFusion [`Statistics`]
-/// for the columns in `table_schema`.
-///
-/// `input` says where the bytes of the file are. The caller builds it, so
-/// statistics and scans go through one mechanism (see [`NetcdfInput`]).
-pub async fn generate_statistics(
-    input: NetcdfInput,
-    table_schema: &arrow::datatypes::Schema,
-) -> anyhow::Result<Statistics> {
-    let location = input.location();
-    let dataset = input
-        .open()
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to open NetCDF dataset {location}: {e}"))?;
-
-    statistics_for_dataset(&dataset, table_schema).await
-}
 
 /// Return DataFusion [`Statistics`] for an already-opened dataset.
 ///
-/// [`generate_statistics`] opens a NetCDF object and calls this. Any other
-/// reader of the same [`AnyDataset`] model calls it directly, so every format
-/// built on ND arrays reports statistics the same way. `beacon-arrow-hdf5` does
-/// exactly that with its own reader.
+/// HDF5 uses this until it moves to the ND framework.
 pub async fn statistics_for_dataset(
     dataset: &AnyDataset,
     table_schema: &arrow::datatypes::Schema,

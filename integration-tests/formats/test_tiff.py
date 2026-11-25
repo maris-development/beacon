@@ -408,25 +408,13 @@ def test_an_external_table_over_a_directory_replace_and_drop(many):
     assert "mosaic" not in many.list_tables()
 
 
-def test_a_partitioned_table_takes_its_values_from_the_path(many):
+def test_a_partitioned_table_is_refused(many):
+    """The ND scan has no partition columns, so a query on a partitioned TIFF table fails."""
     many.execute(
         "CREATE EXTERNAL TABLE hive STORED AS TIFF LOCATION 'hive/' PARTITIONED BY (region, year)")
-    # A partition column is dictionary encoded, so the rows are read through Arrow.
-    def grouped(aggregate: str) -> list[tuple]:
-        rows = many.sql(
-            f"SELECT region, year, {aggregate} AS v FROM hive GROUP BY region, year "
-            "ORDER BY region, year"
-        ).arrow().to_pylist()
-        return [(r["region"], str(r["year"]), r["v"]) for r in rows]
-
-    assert grouped("count(*)") == [
-        ("north", "2023", 30), ("north", "2024", 30), ("south", "2023", 30), ("south", "2024", 30)]
-    # Each partition holds its own file: the smallest longitude tells which one.
-    assert grouped('min("geo.lon")') == [
-        ("north", "2023", 300.5), ("north", "2024", 400.5),
-        ("south", "2023", 306.5), ("south", "2024", 406.5)]
-    one = many.sql("SELECT count(*) FROM hive WHERE region = 'south' AND year = '2024'").fetchall()
-    assert one == [(30,)]
+    with pytest.raises(Exception, match="PARTITIONED BY"):
+        many.sql("SELECT count(*) FROM hive").fetchall()
+    many.execute("DROP TABLE hive")
 
 
 def test_a_json_query_reads_a_glob_with_a_filter(many):

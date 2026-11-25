@@ -132,6 +132,9 @@ example in a second aggregate:
 SELECT count(*), max(sst) FROM t WHERE lat > -90;
 ```
 
+On a NetCDF table, a query must read at least one column of the file, so a `COUNT(*)` with no other
+column gives an error. Use `count(sst)` or another column that spans the grid.
+
 Coordinates that together span the grid also keep it. `WHERE lat > -90 AND lon > -180 AND
 time > '2024-01-01'` uses all three axes of `sst`. A subquery does not help: the optimizer removes
 a column that the outer query does not use.
@@ -208,8 +211,10 @@ For such a file, and only for such a file, Beacon moves the volume to the front:
 4. is the native dimension set of the most variables,
 5. was seen first.
 
-One real dimension name is enough to restore the order above. Every NetCDF and Zarr file names its
-dimensions, so none of them moves. Beacon writes one `info` line. The line names
+One real dimension name is enough to restore the order above. Every NetCDF file names its
+dimensions, so none of them moves. A Zarr group moves only when no dimension of the group has a
+name from `dimension_names`. See [Dimension names](/docs/2.1.0-rc3/formats/zarr#dimension-names).
+Beacon writes one `info` line. The line names
 the variables that it dropped:
 
 ```text

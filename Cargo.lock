@@ -1032,13 +1032,13 @@ dependencies = [
  "beacon-arrow-netcdf",
  "beacon-common",
  "beacon-datafusion-ext",
- "beacon-nd-array",
+ "beacon-nd-dataset",
  "beacon-nd-execution",
+ "beacon-nd-scan",
  "chrono",
  "datafusion 54.1.0",
  "futures",
  "indexmap 2.14.0",
- "ndarray 0.17.2",
  "object_store 0.13.2",
  "oxcdf",
  "oxcdf-hdf5",
@@ -1074,13 +1074,15 @@ dependencies = [
  "beacon-common",
  "beacon-datafusion-ext",
  "beacon-nd-array",
+ "beacon-nd-dataset",
  "beacon-nd-execution",
+ "beacon-nd-scan",
  "chrono",
  "datafusion 54.1.0",
  "futures",
  "hifitime",
  "indexmap 2.14.0",
- "julian",
+ "nd-arrow-array",
  "ndarray 0.17.2",
  "num-traits",
  "object_store 0.13.2",
@@ -1148,14 +1150,13 @@ dependencies = [
  "async-trait",
  "beacon-common",
  "beacon-datafusion-ext",
- "beacon-nd-array",
+ "beacon-nd-dataset",
  "beacon-nd-execution",
+ "beacon-nd-scan",
  "bytes",
  "datafusion 54.1.0",
  "futures",
- "indexmap 2.14.0",
  "moka",
- "ndarray 0.17.2",
  "object_store 0.13.2",
  "serde",
  "tokio",
@@ -1171,14 +1172,16 @@ dependencies = [
  "async-trait",
  "beacon-common",
  "beacon-datafusion-ext",
- "beacon-nd-array",
+ "beacon-nd-dataset",
  "beacon-nd-execution",
+ "beacon-nd-scan",
  "bytes",
+ "chrono",
  "datafusion 54.1.0",
  "futures",
  "hifitime",
  "indexmap 2.14.0",
- "ndarray 0.17.2",
+ "nd-arrow-array",
  "object_store 0.13.2",
  "serde_json",
  "tempfile",
@@ -1260,6 +1263,7 @@ dependencies = [
  "beacon-json-query",
  "beacon-lance",
  "beacon-nd-execution",
+ "beacon-nd-scan",
  "beacon-plugin-formats",
  "beacon-plugin-registry",
  "beacon-plugin-sdk",
@@ -1755,6 +1759,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "beacon-nd-dataset"
+version = "2.1.0-rc.3"
+dependencies = [
+ "arrow",
+ "async-trait",
+ "indexmap 2.14.0",
+ "nd-arrow-array",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+ "tracing-test",
+]
+
+[[package]]
 name = "beacon-nd-encoding"
 version = "2.1.0-rc.3"
 dependencies = [
@@ -1772,6 +1790,24 @@ dependencies = [
  "datafusion 54.1.0",
  "futures",
  "tokio",
+]
+
+[[package]]
+name = "beacon-nd-scan"
+version = "2.1.0-rc.3"
+dependencies = [
+ "arrow",
+ "async-trait",
+ "beacon-datafusion-ext",
+ "beacon-nd-dataset",
+ "beacon-nd-encoding",
+ "beacon-nd-execution",
+ "datafusion 54.1.0",
+ "datafusion-datasource 54.1.0",
+ "futures",
+ "object_store 0.13.2",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -7939,6 +7975,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "nd-arrow-array"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "97f6205303ae82a5bf14e0f889f8d675377d296a6590305111623ed0ef6e54a1"
+dependencies = [
+ "arrow",
+ "arrow-schema",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "ndarray"
 version = "0.16.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8666,8 +8715,8 @@ dependencies = [
 
 [[package]]
 name = "oxcdf"
-version = "0.6.0"
-source = "git+https://github.com/robinskil/oxcdf.git?tag=v0.6.0#b3b943595ed191b286d9cf1f8b0d4ac4aca6d429"
+version = "0.6.1"
+source = "git+https://github.com/robinskil/oxcdf.git?tag=v0.6.1#8ac5d53ad3982613a456486c08e3dbb75a37c3a0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -8680,8 +8729,8 @@ dependencies = [
 
 [[package]]
 name = "oxcdf-hdf5"
-version = "0.6.0"
-source = "git+https://github.com/robinskil/oxcdf.git?tag=v0.6.0#b3b943595ed191b286d9cf1f8b0d4ac4aca6d429"
+version = "0.6.1"
+source = "git+https://github.com/robinskil/oxcdf.git?tag=v0.6.1#8ac5d53ad3982613a456486c08e3dbb75a37c3a0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -11793,6 +11842,27 @@ dependencies = [
  "tracing",
  "tracing-core",
  "tracing-log",
+]
+
+[[package]]
+name = "tracing-test"
+version = "0.2.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "19a4c448db514d4f24c5ddb9f73f2ee71bfb24c526cf0c570ba142d1119e0051"
+dependencies = [
+ "tracing-core",
+ "tracing-subscriber",
+ "tracing-test-macro",
+]
+
+[[package]]
+name = "tracing-test-macro"
+version = "0.2.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ad06847b7afb65c7866a36664b75c40b895e318cea4f71299f013fb22965329d"
+dependencies = [
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]

@@ -89,7 +89,15 @@ def raster_type(path, area_or_point):
         d.update_tags(AREA_OR_POINT=area_or_point)
 
 
+def plain_no_geo(path):
+    # A 6x4 uint8 image with no CRS and no geotransform, so it has no geo tags.
+    profile = dict(driver="GTiff", width=6, height=4, count=1, dtype="uint8")
+    with rasterio.open(path, "w", **profile) as d:
+        d.write(pattern(4, 6, "uint8"), 1)
+
+
 if __name__ == "__main__":
+    plain_no_geo("plain_no_geo_u8.tif")
     packbits_tiled("packbits_tiled_u16.tif")
     raster_type("pixel_is_area.tif", "Area")
     raster_type("pixel_is_point.tif", "Point")

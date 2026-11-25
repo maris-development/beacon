@@ -1,26 +1,24 @@
 //! DataFusion column statistics derived from Zarr stores.
 //!
-//! [`generate_statistics`] is the entry point. It opens a zarr store, walks its
-//! leaf groups and computes a per-column min/max for the columns listed in
+//! [`generate_statistics`] is the entry point. It opens each leaf group of a
+//! store as the ND scan opens it, and computes a min/max for each column of
 //! `table_schema`.
 //!
 //! # The policy
 //!
-//! The same one netCDF applies (see
-//! [`beacon_arrow_netcdf::datafusion::statistics`]), because zarr holds the same
-//! shape of data and answers the same kind of query:
+//! For one column of one leaf group, in this order:
 //!
-//! - An array of rank 0 or rank 1 is small. It is a coordinate — the thing a
-//!   `WHERE` clause names — so read it and take the range.
-//! - An array of rank 2 or higher is a data grid. Report unknown. A full read
-//!   costs far more than the pruning saves, so a scan costs exactly what it cost
-//!   before.
+//! - The array states its range in its `actual_range` attribute. Metadata costs
+//!   no chunk read, so this check is first. A coordinate that states its range
+//!   is never read; a grid that states it gets a bound for free. See
+//!   [`attribute_range`].
+//! - A variable of rank 0 or rank 1 is small. It is a coordinate, the thing a
+//!   `WHERE` clause names, so [`beacon_nd_scan::file_statistics`] reads it and
+//!   takes the range.
+//! - A variable of rank 2 or higher is a data grid. Report unknown. A full read
+//!   costs far more than the pruning saves, so a scan costs exactly what it
+//!   cost before.
 //! - Text and binary have no orderable range. Report unknown.
-//!
-//! Zarr adds one shortcut, and it runs first: an array may state its own range
-//! in its metadata, and reading metadata costs no chunk read. A coordinate that
-//! states it is never read; a grid that states it is bounded for free. See
-//! [`attribute_range`].
 //!
 //! # Why a wrong answer here is worse than no answer
 //!
@@ -34,18 +32,21 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use arrow::datatypes::Schema;
-use beacon_nd_array::{NdArrayD, arrow::compute::value_range, datatypes::NdArrayDataType};
+use arrow::array::{Array, AsArray};
+use arrow::datatypes::{DataType, Field, Float64Type, Schema, TimeUnit};
+use beacon_nd_dataset::{Attributes, NdDataset, NdVariable};
+use beacon_nd_scan::file_statistics;
 use datafusion::{
     common::{ColumnStatistics, Statistics, stats::Precision},
     scalar::ScalarValue,
 };
+use nd_arrow_array::compute::cf::{ADD_OFFSET, SCALE_FACTOR};
 use zarrs::group::Group;
 use zarrs_storage::AsyncReadableListableStorageTraits;
 
 use crate::{
-    backend::{cf_offset_to_timestamp, parse_cf_time_units},
-    reader::{ArrayAttributes, dataset_and_attributes_from_group, project_read_dimensions_or_skip},
+    datafusion::opener::open_leaf,
+    nd::decode::{BoundSide, time_bound},
     util::recursive_groups,
 };
 
@@ -67,7 +68,7 @@ pub async fn generate_statistics(
     skip_unbroadcastable: bool,
     table_schema: &Schema,
 ) -> anyhow::Result<Statistics> {
-    let group = Group::async_open(storage, group_path)
+    let group = Group::async_open(storage.clone(), group_path)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to open Zarr group at '{group_path}': {e}"))?;
 
@@ -82,28 +83,28 @@ pub async fn generate_statistics(
 
     let mut store_ranges = StoreRanges::default();
     for leaf in &leaves {
-        let (dataset, attributes) = dataset_and_attributes_from_group(leaf, None)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to read Zarr group as dataset: {e}"))?;
-        // Match what the scan returns: the same narrowing runs per partition.
-        let Some(dataset) = project_read_dimensions_or_skip(
-            dataset,
+        // The scan open: a leaf that the scan skips is not measured.
+        let Some(dataset) = open_leaf(
+            storage.clone(),
+            leaf.path().as_str(),
             read_dimensions.clone(),
             skip_unbroadcastable,
-            None,
-        )?
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to read Zarr group as dataset: {e}"))?
         else {
             continue;
         };
 
         for name in &names {
-            let Some(array) = dataset.get_array(name) else {
+            let Some(variable) = dataset.variable(name) else {
                 // This leaf has no such column. It contributes nulls to the
                 // scan, and a null widens no bound, so it is simply skipped —
                 // not an unknown that would wipe out the other leaves' range.
                 continue;
             };
-            store_ranges.add(name, column_range(name, array.as_ref(), &attributes).await);
+            let range = column_range(name, variable.as_ref(), dataset.as_ref()).await;
+            store_ranges.add(name, range);
         }
     }
 
@@ -180,33 +181,40 @@ fn to_column_statistics(range: Option<Range>) -> ColumnStatistics {
 
 // ─── One column of one leaf group ───────────────────────────────────────────
 
-/// The range of `array`, or `None` when no bound can be proven cheaply.
+/// The range of the variable `name` of `dataset`, or `None` when no bound can
+/// be proven cheaply. The range has the type of the variable.
 ///
-/// `name` is the column name, which is the array name for a variable and
-/// `"{array}.{attr}"` or `".{attr}"` for an attribute column. Only a variable
-/// has zarr metadata to consult; an attribute column is a rank-0 in-memory value
-/// that costs nothing to measure.
+/// `name` is the array name for a variable and `"{array}.{attr}"` or
+/// `".{attr}"` for an attribute column. Only an array has attributes to
+/// consult; an attribute column is a rank-0 value that costs nothing to measure.
 async fn column_range(
     name: &str,
-    array: &dyn NdArrayD,
-    attributes: &ArrayAttributes,
+    variable: &dyn NdVariable,
+    dataset: &dyn NdDataset,
 ) -> Option<Range> {
     // The metadata path first: it states the range without touching a chunk.
-    if let Some(attrs) = attributes.get(name)
-        && let Some(range) = attribute_range(attrs, array.datatype())
-    {
+    if let Some(range) = attribute_range(variable.attributes(), variable.data_type()) {
         return Some(range);
     }
 
     // A data grid is never read. This is what keeps the scan cost unchanged.
-    if array.dimensions().len() > 1 {
+    if variable.dimensions().rank() > 1 {
         return None;
     }
 
-    let (min, max) = value_range(array).await?;
-    let min = ScalarValue::try_from_array(&min, 0).ok()?;
-    let max = ScalarValue::try_from_array(&max, 0).ok()?;
-    Some((min, max))
+    let schema = Schema::new(vec![Field::new(name, variable.data_type().clone(), true)]);
+    let statistics = match file_statistics(dataset, &schema).await {
+        Ok(statistics) => statistics,
+        Err(error) => {
+            tracing::warn!(column = name, %error, "no Zarr statistics for the column");
+            return None;
+        }
+    };
+    let column = statistics.column_statistics.into_iter().next()?;
+    match (column.min_value, column.max_value) {
+        (Precision::Exact(min), Precision::Exact(max)) => Some((min, max)),
+        _ => None,
+    }
 }
 
 // ─── The metadata shortcut ──────────────────────────────────────────────────
@@ -234,64 +242,67 @@ async fn column_range(
 /// is the cheap case, and a packed grid was never going to be read.
 ///
 /// CF time is decoded, because there the units are unambiguous: the attribute
-/// and the chunk values are both offsets in the array's own `units`, and the
-/// same conversion applies to each.
-fn attribute_range(
-    attributes: &serde_json::Map<String, serde_json::Value>,
-    datatype: NdArrayDataType,
-) -> Option<Range> {
+/// and the chunk values are both offsets in the array's own `units`. Each end
+/// converts with the decode of the variable (see [`time_bound`]), so a Julian
+/// variable uses the Julian epoch. An end out of range gives no bound.
+///
+/// `data_type` is the Arrow type of the variable, and the range has that type.
+fn attribute_range(attributes: &Attributes, data_type: &DataType) -> Option<Range> {
     let (low, high) = actual_range(attributes)?;
 
     // A packed array's attribute is in packed units. Leave it alone.
-    if attributes.contains_key("scale_factor") || attributes.contains_key("add_offset") {
+    if attributes.contains(SCALE_FACTOR) || attributes.contains(ADD_OFFSET) {
         return None;
     }
 
-    match datatype {
-        NdArrayDataType::Timestamp => {
-            let units = attributes.get("units")?.as_str()?;
-            let calendar = attributes.get("calendar").and_then(|v| v.as_str());
-            let (epoch, unit) = parse_cf_time_units(units, calendar)?;
-            let min = cf_offset_to_timestamp(low, epoch, unit).0;
-            let max = cf_offset_to_timestamp(high, epoch, unit).0;
+    match data_type {
+        DataType::Timestamp(TimeUnit::Microsecond, _) => {
+            // A Float32 time stores the f32 nearest to the text. Step out past it.
+            let low = low.next_down().min(((low as f32).next_down()) as f64);
+            let high = high.next_up().max(((high as f32).next_up()) as f64);
             Some((
-                ScalarValue::TimestampNanosecond(Some(min), None),
-                ScalarValue::TimestampNanosecond(Some(max), None),
+                time_bound(data_type, attributes, low, BoundSide::Lower)?,
+                time_bound(data_type, attributes, high, BoundSide::Upper)?,
             ))
         }
-        NdArrayDataType::F64 => Some((
-            ScalarValue::Float64(Some(low)),
-            ScalarValue::Float64(Some(high)),
+        DataType::Timestamp(_, _) => Some((
+            time_bound(data_type, attributes, low, BoundSide::Lower)?,
+            time_bound(data_type, attributes, high, BoundSide::Upper)?,
+        )),
+        // The JSON text may round to an f64 inside the stored value. Step out one ulp.
+        DataType::Float64 => Some((
+            ScalarValue::Float64(Some(low.next_down())),
+            ScalarValue::Float64(Some(high.next_up())),
         )),
         // A JSON number is an f64, so narrowing it to f32 may round the min up
         // or the max down by an ulp and tighten the bound. Step each one back
         // out. A bound one ulp too loose costs nothing; one ulp too tight drops
         // rows.
-        NdArrayDataType::F32 => Some((
+        DataType::Float32 => Some((
             ScalarValue::Float32(Some((low as f32).next_down())),
             ScalarValue::Float32(Some((high as f32).next_up())),
         )),
         // Likewise for integers: floor the min and ceil the max, so a value
         // written as 3.0000000001 cannot exclude 3.
-        NdArrayDataType::I8 => int_range::<i8>(low, high, i8::MIN as f64, i8::MAX as f64)
+        DataType::Int8 => int_range::<i8>(low, high, i8::MIN as f64, i8::MAX as f64)
             .map(|(a, b)| (ScalarValue::Int8(Some(a)), ScalarValue::Int8(Some(b)))),
-        NdArrayDataType::I16 => int_range::<i16>(low, high, i16::MIN as f64, i16::MAX as f64)
+        DataType::Int16 => int_range::<i16>(low, high, i16::MIN as f64, i16::MAX as f64)
             .map(|(a, b)| (ScalarValue::Int16(Some(a)), ScalarValue::Int16(Some(b)))),
-        NdArrayDataType::I32 => int_range::<i32>(low, high, i32::MIN as f64, i32::MAX as f64)
+        DataType::Int32 => int_range::<i32>(low, high, i32::MIN as f64, i32::MAX as f64)
             .map(|(a, b)| (ScalarValue::Int32(Some(a)), ScalarValue::Int32(Some(b)))),
-        NdArrayDataType::I64 => int_range::<i64>(low, high, i64::MIN as f64, i64::MAX as f64)
+        DataType::Int64 => int_range::<i64>(low, high, i64::MIN as f64, i64::MAX as f64)
             .map(|(a, b)| (ScalarValue::Int64(Some(a)), ScalarValue::Int64(Some(b)))),
-        NdArrayDataType::U8 => int_range::<u8>(low, high, u8::MIN as f64, u8::MAX as f64)
+        DataType::UInt8 => int_range::<u8>(low, high, u8::MIN as f64, u8::MAX as f64)
             .map(|(a, b)| (ScalarValue::UInt8(Some(a)), ScalarValue::UInt8(Some(b)))),
-        NdArrayDataType::U16 => int_range::<u16>(low, high, u16::MIN as f64, u16::MAX as f64)
+        DataType::UInt16 => int_range::<u16>(low, high, u16::MIN as f64, u16::MAX as f64)
             .map(|(a, b)| (ScalarValue::UInt16(Some(a)), ScalarValue::UInt16(Some(b)))),
-        NdArrayDataType::U32 => int_range::<u32>(low, high, u32::MIN as f64, u32::MAX as f64)
+        DataType::UInt32 => int_range::<u32>(low, high, u32::MIN as f64, u32::MAX as f64)
             .map(|(a, b)| (ScalarValue::UInt32(Some(a)), ScalarValue::UInt32(Some(b)))),
-        NdArrayDataType::U64 => int_range::<u64>(low, high, u64::MIN as f64, u64::MAX as f64)
+        DataType::UInt64 => int_range::<u64>(low, high, u64::MIN as f64, u64::MAX as f64)
             .map(|(a, b)| (ScalarValue::UInt64(Some(a)), ScalarValue::UInt64(Some(b)))),
         // A boolean range prunes nothing worth the bytes, and text and binary
         // have no numeric range at all.
-        NdArrayDataType::Bool | NdArrayDataType::String | NdArrayDataType::Binary => None,
+        _ => None,
     }
 }
 
@@ -299,13 +310,18 @@ fn attribute_range(
 ///
 /// Anything else — a missing attribute, a wrong length, a non-number, a NaN or
 /// an infinity — is not a bound and yields `None`.
-fn actual_range(attributes: &serde_json::Map<String, serde_json::Value>) -> Option<(f64, f64)> {
-    let values = attributes.get("actual_range")?.as_array()?;
-    let [low, high] = values.as_slice() else {
+fn actual_range(attributes: &Attributes) -> Option<(f64, f64)> {
+    // A JSON array of numbers is a `List<Float64>` of one item.
+    let list = attributes.get("actual_range")?.as_list_opt::<i32>()?;
+    if list.len() != 1 || list.is_null(0) {
         return None;
-    };
-    let low = low.as_f64()?;
-    let high = high.as_f64()?;
+    }
+    let items = list.value(0);
+    let values = items.as_primitive_opt::<Float64Type>()?;
+    if values.len() != 2 || values.null_count() != 0 {
+        return None;
+    }
+    let (low, high) = (values.value(0), values.value(1));
     if !low.is_finite() || !high.is_finite() {
         return None;
     }
@@ -315,15 +331,15 @@ fn actual_range(attributes: &serde_json::Map<String, serde_json::Value>) -> Opti
 
 /// The largest magnitude an f64 holds as an exact integer (2^53).
 ///
-/// Past it a JSON number no longer round-trips, so `floor`/`ceil` stop being
-/// the safe direction and no bound is claimed.
+/// At and past it a JSON number may not round-trip: 2^53 + 1 parses to 2^53.
+/// There `floor`/`ceil` stop being the safe direction and no bound is claimed.
 const EXACT_INTEGER: f64 = 9_007_199_254_740_992.0;
 
 /// Floor `low` and ceil `high` into `T`, or `None` if either falls outside it.
 fn int_range<T: TryFrom<i64>>(low: f64, high: f64, min: f64, max: f64) -> Option<(T, T)> {
     let low = low.floor();
     let high = high.ceil();
-    if low < min || high > max || low < -EXACT_INTEGER || high > EXACT_INTEGER {
+    if low < min || high > max || low <= -EXACT_INTEGER || high >= EXACT_INTEGER {
         return None;
     }
     Some((
@@ -337,27 +353,62 @@ fn int_range<T: TryFrom<i64>>(low: f64, high: f64, min: f64, max: f64) -> Option
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arrow::array::Float64Array;
+    use nd_arrow_array::compute::time::timestamp_type;
+    use nd_arrow_array::{Dimensions, NdArrowArray};
     use serde_json::json;
 
-    fn attrs(pairs: &[(&str, serde_json::Value)]) -> serde_json::Map<String, serde_json::Value> {
-        pairs
+    use crate::nd::decode::Decode;
+    use crate::nd::attributes_of;
+
+    /// The attributes that a Zarr array with these JSON attributes gets.
+    fn attrs(pairs: &[(&str, serde_json::Value)]) -> Attributes {
+        let json = pairs
             .iter()
             .map(|(key, value)| ((*key).to_string(), value.clone()))
+            .collect();
+        attributes_of(&json)
+    }
+
+    /// The values that the read decode gives for the stored `Float64` values.
+    fn decoded(attributes: &Attributes, values: Vec<f64>) -> Vec<ScalarValue> {
+        let len = values.len();
+        let raw = NdArrowArray::try_new(
+            Arc::new(Float64Array::from(values)),
+            Dimensions::try_new([("x", len)]).unwrap(),
+        )
+        .unwrap()
+        .with_attributes(attributes.clone());
+        let out = Decode::choose(&DataType::Float64, attributes)
+            .apply(raw)
+            .unwrap();
+        (0..len)
+            .map(|i| ScalarValue::try_from_array(out.values(), i).unwrap())
             .collect()
+    }
+
+    /// The f64 range of `attributes`: the min and the max.
+    fn f64_bounds(attributes: &Attributes) -> (f64, f64) {
+        let range = attribute_range(attributes, &DataType::Float64).unwrap();
+        let (ScalarValue::Float64(Some(min)), ScalarValue::Float64(Some(max))) = range else {
+            panic!("expected an f64 range, got {range:?}");
+        };
+        (min, max)
     }
 
     #[test]
     fn actual_range_bounds_a_float_array() {
         let a = attrs(&[("actual_range", json!([-1.5, 3.5]))]);
-        let range = attribute_range(&a, NdArrayDataType::F64).unwrap();
-        assert_eq!(range.0, ScalarValue::Float64(Some(-1.5)));
-        assert_eq!(range.1, ScalarValue::Float64(Some(3.5)));
+        let (min, max) = f64_bounds(&a);
+        // The bound is one step wider than the stated values.
+        assert!(min < -1.5 && min >= (-1.5f64).next_down(), "min {min}");
+        assert!(max > 3.5 && max <= 3.5f64.next_up(), "max {max}");
     }
 
     #[test]
     fn actual_range_is_widened_for_f32() {
         let a = attrs(&[("actual_range", json!([0.1, 0.2]))]);
-        let (min, max) = attribute_range(&a, NdArrayDataType::F32).unwrap();
+        let (min, max) = attribute_range(&a, &DataType::Float32).unwrap();
         let (ScalarValue::Float32(Some(min)), ScalarValue::Float32(Some(max))) = (min, max) else {
             panic!("expected an f32 range");
         };
@@ -369,41 +420,144 @@ mod tests {
     #[test]
     fn actual_range_floors_and_ceils_for_integers() {
         let a = attrs(&[("actual_range", json!([-3.2, 4.1]))]);
-        let range = attribute_range(&a, NdArrayDataType::I32).unwrap();
+        let range = attribute_range(&a, &DataType::Int32).unwrap();
         assert_eq!(range.0, ScalarValue::Int32(Some(-4)));
         assert_eq!(range.1, ScalarValue::Int32(Some(5)));
+    }
+
+    /// 2^53 + 1 parses to the f64 2^53, so a bound at 2^53 may sit below the data.
+    #[test]
+    fn an_integer_actual_range_at_two_to_the_53_is_unknown() {
+        let high = attrs(&[("actual_range", json!([0, 9007199254740992.0]))]);
+        assert!(attribute_range(&high, &DataType::Int64).is_none());
+
+        let low = attrs(&[("actual_range", json!([-9007199254740992.0, 0]))]);
+        assert!(attribute_range(&low, &DataType::Int64).is_none());
+
+        let exact = attrs(&[("actual_range", json!([0, 9007199254740991.0]))]);
+        let range = attribute_range(&exact, &DataType::Int64).unwrap();
+        assert_eq!(range.0, ScalarValue::Int64(Some(0)));
+        assert_eq!(range.1, ScalarValue::Int64(Some(9_007_199_254_740_991)));
     }
 
     #[test]
     fn actual_range_outside_the_integer_type_is_rejected() {
         let a = attrs(&[("actual_range", json!([0, 40000]))]);
-        assert!(attribute_range(&a, NdArrayDataType::I16).is_none());
+        assert!(attribute_range(&a, &DataType::Int16).is_none());
     }
 
     /// A CF time attribute must decode through the very conversion the reader
-    /// applies to the chunk values. Asserting a hand-computed nanosecond count
-    /// would only test hifitime; asserting equality with the reader's own
+    /// applies to the chunk values. Asserting a hand-computed microsecond count
+    /// would only test the time kernel; asserting equality with the reader's own
     /// conversion is what keeps the bound a bound.
     #[test]
     fn actual_range_decodes_cf_time_the_way_the_reader_does() {
-        let units = "seconds since 1970-01-01";
-        let a = attrs(&[("actual_range", json!([0, 60])), ("units", json!(units))]);
-        let (epoch, unit) = parse_cf_time_units(units, None).unwrap();
-        let range = attribute_range(&a, NdArrayDataType::Timestamp).unwrap();
+        let a = attrs(&[
+            ("actual_range", json!([0, 60])),
+            ("units", json!("seconds since 1970-01-01")),
+        ]);
+        let range = attribute_range(&a, &timestamp_type()).unwrap();
+        let expected = decoded(&a, vec![0.0, 60.0]);
         assert_eq!(
-            range.0,
-            ScalarValue::TimestampNanosecond(
-                Some(cf_offset_to_timestamp(0.0, epoch, unit).0),
-                None
-            )
+            expected[1],
+            ScalarValue::TimestampMicrosecond(Some(60_000_000), None)
         );
-        assert_eq!(
-            range.1,
-            ScalarValue::TimestampNanosecond(
-                Some(cf_offset_to_timestamp(60.0, epoch, unit).0),
-                None
-            )
+        assert_within_one_f32_step(&a, &range, 0.0, 60.0);
+    }
+
+    /// The time range contains the decode of `low` and `high`, and is at most
+    /// one f32 step wider on each side.
+    fn assert_within_one_f32_step(attributes: &Attributes, range: &Range, low: f64, high: f64) {
+        let inner = decoded(attributes, vec![low, high]);
+        let outer = decoded(
+            attributes,
+            vec![
+                (low as f32).next_down() as f64,
+                (high as f32).next_up() as f64,
+            ],
         );
+        assert!(
+            outer[0] <= range.0 && range.0 <= inner[0],
+            "min {:?} {inner:?} {outer:?}",
+            range.0
+        );
+        assert!(
+            inner[1] <= range.1 && range.1 <= outer[1],
+            "max {:?} {inner:?} {outer:?}",
+            range.1
+        );
+    }
+
+    /// `CfTimeUnits` alone reads the Julian reference date as Gregorian, 13 days early.
+    #[test]
+    fn a_julian_actual_range_uses_the_julian_epoch() {
+        let a = attrs(&[
+            ("actual_range", json!([0, 1])),
+            ("units", json!("days since 2000-01-01")),
+            ("calendar", json!("julian")),
+        ]);
+        let range = attribute_range(&a, &timestamp_type()).unwrap();
+        assert_within_one_f32_step(&a, &range, 0.0, 1.0);
+        // Gregorian 2000-01-01, the date the reference text names.
+        let gregorian = ScalarValue::TimestampMicrosecond(Some(946_684_800_000_000), None);
+        assert_ne!(range.0, gregorian);
+    }
+
+    /// A Float32 time stores the f32 nearest to the text, which the f64 of the
+    /// JSON attribute can miss.
+    #[test]
+    fn a_float32_time_range_contains_the_decoded_values() {
+        let a = attrs(&[
+            ("actual_range", json!([0.1, 0.2])),
+            ("units", json!("days since 1970-01-01")),
+        ]);
+        let micros = DataType::Timestamp(TimeUnit::Microsecond, None);
+        let range = attribute_range(&a, &micros).unwrap();
+        let expected = decoded(&a, vec![0.1f32 as f64, 0.2f32 as f64]);
+        assert!(range.0 <= expected[0], "min {range:?} {expected:?}");
+        assert!(range.1 >= expected[1], "max {range:?} {expected:?}");
+    }
+
+    #[test]
+    fn a_nanosecond_actual_range_is_timestamp_ns() {
+        let a = attrs(&[
+            ("actual_range", json!([5, 9])),
+            ("units", json!("nanoseconds since 1970-01-01")),
+        ]);
+        let nanos = DataType::Timestamp(TimeUnit::Nanosecond, None);
+        let range = attribute_range(&a, &nanos).unwrap();
+        assert_eq!(range.0, ScalarValue::TimestampNanosecond(Some(5), None));
+        assert_eq!(range.1, ScalarValue::TimestampNanosecond(Some(9), None));
+    }
+
+    #[test]
+    fn a_time_range_out_of_range_is_unknown() {
+        let a = attrs(&[
+            ("actual_range", json!([0, 1e300])),
+            ("units", json!("days since 1970-01-01")),
+        ]);
+        assert!(attribute_range(&a, &timestamp_type()).is_none());
+    }
+
+    #[test]
+    fn a_time_range_out_of_range_at_the_low_end_is_unknown() {
+        let a = attrs(&[
+            ("actual_range", json!([-1e300, 0])),
+            ("units", json!("days since 1970-01-01")),
+        ]);
+        assert!(attribute_range(&a, &timestamp_type()).is_none());
+    }
+
+    /// A packed time variable states its range in packed units.
+    #[test]
+    fn a_packed_time_variable_gives_no_shortcut() {
+        let a = attrs(&[
+            ("actual_range", json!([0, 1])),
+            ("units", json!("days since 1970-01-01")),
+            ("scale_factor", json!(0.5)),
+        ]);
+        let micros = DataType::Timestamp(TimeUnit::Microsecond, None);
+        assert!(attribute_range(&a, &micros).is_none());
     }
 
     /// The pruning contract: `valid_min`/`valid_max` bound the *valid* values,
@@ -411,7 +565,7 @@ mod tests {
     #[test]
     fn valid_min_and_valid_max_are_never_a_bound() {
         let a = attrs(&[("valid_min", json!(0.0)), ("valid_max", json!(100.0))]);
-        assert!(attribute_range(&a, NdArrayDataType::F64).is_none());
+        assert!(attribute_range(&a, &DataType::Float64).is_none());
     }
 
     /// A packed array states a packed range. Beacon surfaces unpacked values,
@@ -423,7 +577,7 @@ mod tests {
             ("scale_factor", json!(0.01)),
             ("add_offset", json!(273.15)),
         ]);
-        assert!(attribute_range(&a, NdArrayDataType::F64).is_none());
+        assert!(attribute_range(&a, &DataType::Float64).is_none());
     }
 
     #[test]
@@ -437,7 +591,7 @@ mod tests {
         ] {
             let a = attrs(&[("actual_range", value.clone())]);
             assert!(
-                attribute_range(&a, NdArrayDataType::F64).is_none(),
+                attribute_range(&a, &DataType::Float64).is_none(),
                 "{value} must not produce a bound"
             );
         }
@@ -446,9 +600,9 @@ mod tests {
     #[test]
     fn reversed_actual_range_is_read_low_first() {
         let a = attrs(&[("actual_range", json!([9.0, 1.0]))]);
-        let range = attribute_range(&a, NdArrayDataType::F64).unwrap();
-        assert_eq!(range.0, ScalarValue::Float64(Some(1.0)));
-        assert_eq!(range.1, ScalarValue::Float64(Some(9.0)));
+        let (min, max) = f64_bounds(&a);
+        assert!(min < 1.0 && min >= 1.0f64.next_down(), "min {min}");
+        assert!(max > 9.0 && max <= 9.0f64.next_up(), "max {max}");
     }
 
     // ── folding leaf groups ──────────────────────────────────────────────
@@ -484,6 +638,24 @@ mod tests {
         ranges.add("lat", Some(f64_range(10.0, 20.0)));
         ranges.add("lat", None);
         ranges.add("lat", Some(f64_range(0.0, 1.0)));
+        let stats = ranges.column_statistics("lat");
+        assert_eq!(stats.min_value, Precision::Absent);
+        assert_eq!(stats.max_value, Precision::Absent);
+    }
+
+    /// A statistics error gives `None` for the leaf group, in either order.
+    #[test]
+    fn a_statistics_error_makes_the_column_unknown() {
+        let mut ranges = StoreRanges::default();
+        ranges.add("lat", Some(f64_range(10.0, 20.0)));
+        ranges.add("lat", None);
+        let stats = ranges.column_statistics("lat");
+        assert_eq!(stats.min_value, Precision::Absent);
+        assert_eq!(stats.max_value, Precision::Absent);
+
+        let mut ranges = StoreRanges::default();
+        ranges.add("lat", None);
+        ranges.add("lat", Some(f64_range(10.0, 20.0)));
         let stats = ranges.column_statistics("lat");
         assert_eq!(stats.min_value, Precision::Absent);
         assert_eq!(stats.max_value, Precision::Absent);

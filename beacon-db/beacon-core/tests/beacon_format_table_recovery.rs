@@ -64,7 +64,7 @@ async fn beacon_format_external_table_survives_restart() {
 
     rt.sql("CREATE EXTERNAL TABLE h5obs STORED AS HDF5 LOCATION 'h5/data.h5'")
         .await;
-    let before = common::scalar_i64(&rt.sql("SELECT count(*) FROM h5obs").await);
+    let before = common::scalar_i64(&rt.sql("SELECT count(a) FROM h5obs").await);
     assert_eq!(before, 3, "sanity: the HDF5 external table reads before restart");
 
     let rt = rt.restart().await;
@@ -81,7 +81,7 @@ async fn beacon_format_external_table_survives_restart() {
     );
 
     assert_eq!(
-        common::scalar_i64(&rt.sql("SELECT count(*) FROM h5obs").await),
+        common::scalar_i64(&rt.sql("SELECT count(a) FROM h5obs").await),
         3,
         "the recovered HDF5 external table should still read its rows"
     );

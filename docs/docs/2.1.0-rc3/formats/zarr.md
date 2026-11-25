@@ -54,6 +54,23 @@ multi-dimensional store.
 - Beacon decompresses a compressed chunk automatically. It supports zstd, gzip, blosc and more.
 - One external table can hold several Zarr stores. Use a glob pattern such as `sst/*/zarr.json`.
 - Beacon fully supports S3 and other object stores.
+- `COUNT(*)` and a row limit (`LIMIT`) also reach the scan.
+
+### Dimension names
+
+A Zarr v3 array names its axes in `dimension_names`. Beacon uses these names as the dimensions of
+the table.
+
+- An axis with no name gets the name `dim_{i}`. `i` is the position of the axis: `dim_0`, `dim_1`
+  and so on.
+- Two arrays can give `dim_{i}` two sizes. The first array in name order keeps `dim_{i}`. A later
+  array with a different size gets `{array}_dim_{i}`, for example `sst_dim_0`.
+- Beacon never gives an axis a name that an array of the group writes in `dimension_names`. Beacon
+  then takes the next free name: `{array}_dim_{i}`, then `{array}_dim_{i}_2` and so on.
+- A name in `dimension_names` has one size in a group. A name with two sizes is an error. The error
+  names the dimension, the two arrays and the two sizes.
+- A group in which no dimension has a name from `dimension_names` follows the rule for
+  [a file that names no dimension](/docs/2.1.0-rc3/arrays-to-tables#a-file-that-names-no-dimension).
 
 ### Array attributes
 
@@ -61,7 +78,14 @@ A Zarr array holds its attributes in the `attributes` section of its `zarr.json`
 as extra columns. It uses dot notation: `<array>.<attribute>`. The `units` attribute of the `sst`
 array becomes the column `sst.units`.
 
-An attribute column keeps the type from the file: string, integer, float and so on.
+The type of an attribute column comes from the JSON value:
+
+| JSON value | Column type |
+| --- | --- |
+| string | `Utf8` |
+| number, also an integer | `Float64` |
+| `true` or `false` | `Boolean` |
+| list, object or `null` | No column |
 
 A root attribute of the store belongs to no array. Beacon shows it with a leading dot and no array
 prefix: `.<attribute>`. The root attribute `Conventions` becomes the column `.Conventions`.
@@ -74,7 +98,11 @@ LIMIT 1
 
 Limitations:
 
-- Beacon does not support user-defined data types.
+- Beacon reads the data types `bool`, `int8` to `int64`, `uint8` to `uint64`, `float32`,
+  `float64`, `string` and `bytes`. Beacon leaves out an array of a different type, for example
+  `float16` or a user-defined data type. That array gives no column and no attribute columns.
+- Beacon leaves out an array that repeats a dimension name, such as `m(x, x)`. That array also
+  gives no attribute columns.
 
 :::tip
 Predicate pushdown is automatic. Beacon prunes chunks and slices the coordinate dimensions such as
@@ -84,6 +112,53 @@ Do you query a collection often? Then convert the Zarr stores into one
 [Atlas](/docs/2.1.0-rc3/formats/atlas) collection. Atlas is an array store
 with statistics. Beacon can drop whole datasets before it reads a chunk.
 :::
+
+## CF decode
+
+Beacon applies the CF conventions of an array when it reads the array. The table shows the result
+for each case.
+
+| Case | Result |
+| --- | --- |
+| CF time variable (`units = "<unit> since <date>"`) | `Timestamp(µs)` |
+| Packed time (`scale_factor` or `add_offset`, with `units = "<unit> since <date>"`) | `Timestamp(µs)` |
+| Integer variable with `units = "nanoseconds since <date>"`, without `scale_factor` and `add_offset` | `Timestamp(ns)` |
+| Float variable with `units = "nanoseconds since <date>"` | Numbers |
+| Calendar absent, `standard`, `gregorian`, `proleptic_gregorian` or `julian` | A timestamp |
+| Calendar `noleap`, `360_day` or a different calendar | Numbers |
+| NaN, infinite or out-of-range time value | Null |
+| Packed values (`scale_factor`, `add_offset`) | `Float64` |
+| `_FillValue` | The values equal to it become null. |
+| `missing_value`, with one or more values | The values equal to one of them become null. |
+| `valid_min`, `valid_max`, `valid_range` | The values outside the range become null. |
+| `_FillValue` on a `string` or `bool` array | The values equal to it become null. |
+| `fill_value` in the array metadata | No null. Beacon reads the value. |
+
+Beacon's Zarr writer writes a `Timestamp(ns)` column as `int64` with the unit
+`nanoseconds since 1970-01-01T00:00:00Z`. Beacon reads such a store back as `Timestamp(ns)`.
+
+### Create a table again
+
+An external table keeps the column types that Beacon stored when you created the table. Beacon casts
+the new types to the stored types. A stored `Timestamp(ns)` column continues to work.
+
+A column that changes from a time to a number is different. The cast reads the number as
+nanoseconds since 1970 and gives wrong times. This applies to two cases:
+
+- A time variable with a calendar that is not standard, Gregorian or Julian.
+- A float variable with `nanoseconds since` units.
+
+A packed time column also keeps its stored type, `Float64`.
+
+Drop each such table and create it again. The table then gets the new types. If Beacon inferred the
+schema of the table, [`REFRESH`](/docs/2.1.0-rc3/sql/create-external-table#refresh) also gives the
+new types.
+
+A table with `'use_statistics_pruning' 'true'` also keeps its old
+[file statistics](/docs/2.1.0-rc3/internals/file-statistics). An earlier Beacon version cut a CF
+time to whole nanoseconds. This version rounds a CF time to the nearest microsecond. An old maximum can
+therefore be below the value that a query now reads. The query then prunes a store that holds a
+match. Drop the table and create it again. `DROP TABLE` deletes the statistics of the table.
 
 ## As an external table
 

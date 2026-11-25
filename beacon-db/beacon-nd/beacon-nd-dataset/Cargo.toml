@@ -1,0 +1,20 @@
+[package]
+name = "beacon-nd-dataset"
+version.workspace = true
+edition = "2024"
+rust-version.workspace = true
+description = "The dataset contract of the Beacon ND framework"
+license = "AGPL-3.0-only"
+repository = "https://github.com/maris-development/beacon"
+
+[dependencies]
+nd-arrow-array = { workspace = true }
+arrow = { workspace = true }
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+indexmap = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+tracing-test = { workspace = true }

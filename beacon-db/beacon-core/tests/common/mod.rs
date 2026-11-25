@@ -32,6 +32,28 @@ use datafusion::execution::object_store::ObjectStoreUrl;
 use futures::TryStreamExt;
 use tempfile::TempDir;
 
+/// Write one small regular NetCDF file: column `V0` holds `0.0, 1.0, ..` for `rows` rows.
+pub fn write_regular_netcdf(path: &Path, rows: usize) {
+    use arrow::array::{ArrayRef, Float64Array};
+    use arrow::datatypes::{DataType, Field, Schema};
+    use beacon_arrow_netcdf::encoders::default::DefaultEncoder;
+    use beacon_arrow_netcdf::writer::ArrowRecordBatchWriter;
+
+    let schema = Arc::new(Schema::new(vec![Field::new(
+        "V0",
+        DataType::Float64,
+        false,
+    )]));
+    let values: ArrayRef =
+        Arc::new(Float64Array::from_iter_values((0..rows).map(|row| row as f64)));
+    let batch = RecordBatch::try_new(schema.clone(), vec![values]).expect("a batch");
+
+    let mut writer =
+        ArrowRecordBatchWriter::<DefaultEncoder>::new(path, schema).expect("a netCDF writer");
+    writer.write_record_batch(batch).expect("write the batch");
+    writer.finish().expect("finish the file");
+}
+
 
 /// The isolated storage layout a test runs against: a datasets directory (where
 /// the test writes the files it queries), a tmp directory (query-output files),
