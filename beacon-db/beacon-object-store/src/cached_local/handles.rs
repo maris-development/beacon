@@ -30,9 +30,7 @@ pub(crate) struct OpenFile {
     pub version: FileVersion,
     /// The epoch of this open. No other handle has it.
     pub epoch: u64,
-    /// The generation slot of the path.
-    slot: usize,
-    /// The slot generation read before the open.
+    /// The generation of the path, read before the open.
     generation: u64,
     /// The last version check, in microseconds since the `HandleCache` start.
     checked_at: AtomicU64,
@@ -85,18 +83,59 @@ fn map_io_error(path: &Path, e: io::Error) -> LoadError {
     LoadError::Io(Arc::new(e))
 }
 
-/// The number of invalidation generation slots of a [`HandleCache`].
-const GENERATION_SLOTS: usize = 4096;
+/// Invalidation generations by path. A handle opened before the last invalidation of its
+/// path is never returned.
+///
+/// A path has an entry from its first open until no handle of it is open. A handle whose
+/// path has no entry is outdated. Generations are never reused.
+#[derive(Default)]
+struct Generations {
+    by_path: parking_lot::RwLock<HashMap<PathBuf, u64>>,
+    last: AtomicU64,
+}
+
+impl Generations {
+    /// A generation above all generations given so far.
+    fn fresh(&self) -> u64 {
+        self.last.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    /// The generation of `path` for an open, with a new entry if `path` has none.
+    fn for_open(&self, path: &Path) -> u64 {
+        if let Some(generation) = self.by_path.read().get(path) {
+            return *generation;
+        }
+        *self
+            .by_path
+            .write()
+            .entry(path.to_path_buf())
+            .or_insert_with(|| self.fresh())
+    }
+
+    /// The generation of `path`, or one above all opens so far if `path` has no entry.
+    fn current(&self, path: &Path) -> u64 {
+        let generation = self.by_path.read().get(path).copied();
+        generation.unwrap_or_else(|| self.fresh())
+    }
+
+    /// Outdates the open handles of `path`. Other paths keep their handles.
+    fn bump(&self, path: &Path) {
+        if let Some(generation) = self.by_path.write().get_mut(path) {
+            *generation = self.fresh();
+        }
+    }
+
+    fn is_outdated(&self, path: &Path, file: &OpenFile) -> bool {
+        self.by_path.read().get(path) != Some(&file.generation)
+    }
+}
 
 /// A bounded cache of open file handles, keyed by filesystem path.
 pub(crate) struct HandleCache {
     cache: Cache<PathBuf, Arc<OpenFile>>,
     /// The handles by path, for a lookup that does not count as a use of the cache.
     known: Arc<parking_lot::Mutex<HashMap<PathBuf, Weak<OpenFile>>>>,
-    /// Invalidation counters, one per path hash slot. A handle opened before the last
-    /// invalidation of its slot is never returned.
-    generations: Arc<[AtomicU64]>,
-    hasher: std::hash::RandomState,
+    generations: Arc<Generations>,
     revalidate_after: Duration,
     on_change: Option<OnChange>,
     opens: Arc<AtomicU64>,
@@ -126,8 +165,7 @@ impl HandleCache {
                 .time_to_idle(opts.handle_idle)
                 .build(),
             known: Default::default(),
-            generations: (0..GENERATION_SLOTS).map(|_| AtomicU64::new(0)).collect(),
-            hasher: Default::default(),
+            generations: Default::default(),
             revalidate_after: opts.revalidate_after,
             on_change,
             opens: Arc::new(AtomicU64::new(0)),
@@ -169,7 +207,7 @@ impl HandleCache {
     /// Drops the cached handle of `path`, also one that an open in progress inserts later.
     /// Runs `on_change` when a cached handle was removed.
     pub async fn invalidate(&self, path: &Path) {
-        self.generations[self.slot(path)].fetch_add(1, Ordering::SeqCst);
+        self.generations.bump(path);
         self.known.lock().remove(path);
         if self.cache.remove(path).await.is_some() {
             #[cfg(test)]
@@ -183,7 +221,11 @@ impl HandleCache {
     /// Closes the handles that are idle or past the capacity.
     pub async fn run_pending_tasks(&self) {
         self.cache.run_pending_tasks().await;
-        self.known.lock().retain(|_, file| file.strong_count() > 0);
+        let mut by_path = self.generations.by_path.write();
+        let mut known = self.known.lock();
+        known.retain(|_, file| file.strong_count() > 0);
+        // An open in progress whose entry goes here only costs one more open.
+        by_path.retain(|path, _| known.contains_key(path));
     }
 
     /// The number of cached handles.
@@ -192,20 +234,9 @@ impl HandleCache {
         self.cache.entry_count()
     }
 
-    /// The generation slot of `path`.
-    fn slot(&self, path: &Path) -> usize {
-        use std::hash::BuildHasher;
-        (self.hasher.hash_one(path) % GENERATION_SLOTS as u64) as usize
-    }
-
-    /// True when `file` was opened before the last invalidation of its slot.
-    fn is_outdated(&self, file: &OpenFile) -> bool {
-        self.generations[file.slot].load(Ordering::SeqCst) != file.generation
-    }
-
     /// Drops `file`, an outdated handle of `path`, if it is cached, without a new generation.
     ///
-    /// Does not run `on_change`: the outdated slot can belong to another path.
+    /// Does not run `on_change`: the invalidation that outdated `file` ran it already.
     async fn discard(&self, path: &Path, file: &Arc<OpenFile>) {
         if self
             .cache
@@ -240,10 +271,10 @@ impl HandleCache {
         path: &Path,
         fresh: impl Fn(u64, u64) -> bool,
     ) -> Result<Arc<OpenFile>, object_store::Error> {
-        let called_at = self.generations[self.slot(path)].load(Ordering::SeqCst);
+        let called_at = self.generations.current(path);
         loop {
             let file = self.load(path).await?;
-            if self.is_outdated(&file) {
+            if self.generations.is_outdated(path, &file) {
                 self.discard(path, &file).await;
                 // An open after all invalidations before this call can serve this call, uncached.
                 if file.generation >= called_at
@@ -323,16 +354,15 @@ impl HandleCache {
         let known = self.known.clone();
         let opens = self.opens.clone();
         let start = self.start;
-        let slot = self.slot(path);
         let generations = self.generations.clone();
         #[cfg(test)]
         let gate = self.pause_after_open.lock().take();
         self.cache
             .try_get_with_by_ref(path, async move {
                 // Read before the open, so that a later invalidation outdates this handle.
-                let generation = generations[slot].load(Ordering::SeqCst);
+                let generation = generations.for_open(&owned);
                 let opened = tokio::task::spawn_blocking(move || {
-                    let opened = open(&owned, &opens, start, slot, generation);
+                    let opened = open(&owned, &opens, start, generation);
                     #[cfg(test)]
                     if let Some((opened_tx, resume_rx)) = gate {
                         opened_tx.send(()).unwrap();
@@ -356,7 +386,6 @@ fn open(
     path: &Path,
     opens: &AtomicU64,
     start: Instant,
-    slot: usize,
     generation: u64,
 ) -> Result<OpenFile, LoadError> {
     opens.fetch_add(1, Ordering::Relaxed);
@@ -370,7 +399,6 @@ fn open(
         file,
         version: FileVersion::from_metadata(&m),
         epoch: NEXT_EPOCH.fetch_add(1, Ordering::Relaxed),
-        slot,
         generation,
         checked_at: AtomicU64::new(start.elapsed().as_micros() as u64),
         revalidating: tokio::sync::Mutex::new(()),
@@ -413,6 +441,41 @@ mod tests {
             assert_eq!(f.version.size, 3);
         }
         assert_eq!(cache.opens(), 1);
+    }
+
+    #[tokio::test]
+    async fn other_paths_do_not_outdate_a_handle() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("a.bin");
+        std::fs::write(&p, b"abc").unwrap();
+        let cache = HandleCache::new(&opts(Duration::from_secs(3600)), None);
+        let first = cache.get(&p).await.unwrap();
+        // Writes to 20000 other paths, which never had a handle.
+        for i in 0..20_000 {
+            cache
+                .invalidate(&dir.path().join(format!("other_{i}.bin")))
+                .await;
+        }
+        let again = cache.get(&p).await.unwrap();
+        assert!(
+            Arc::ptr_eq(&first, &again),
+            "an unrelated write reopened the file"
+        );
+        assert_eq!(cache.opens(), 1);
+    }
+
+    #[tokio::test]
+    async fn generations_leave_with_their_handles() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = HandleCache::new(&opts(Duration::from_secs(3600)), None);
+        for i in 0..10 {
+            let p = dir.path().join(format!("{i}.bin"));
+            std::fs::write(&p, b"abc").unwrap();
+            cache.get(&p).await.unwrap();
+            cache.invalidate(&p).await;
+        }
+        cache.run_pending_tasks().await;
+        assert!(cache.generations.by_path.read().is_empty());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
