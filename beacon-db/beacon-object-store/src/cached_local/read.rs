@@ -504,6 +504,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn evicted_handle_blocks_never_reach_new_handle() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("a.bin");
+        std::fs::write(&p, vec![1u8; 10_000]).unwrap();
+        set_mtime(&p, 1_000_000);
+        let opts = CachedLocalOptions {
+            revalidate_after: Duration::from_secs(3600),
+            handle_idle: Duration::from_millis(100),
+            block_size: 4096,
+            ..Default::default()
+        };
+        let reader = Arc::new(Reader::new(&opts));
+        // Caches block 0 of the old file.
+        reader
+            .get_ranges(&p, std::slice::from_ref(&(0..100)))
+            .await
+            .unwrap();
+        // The idle handle expires; no invalidation runs.
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        replace(&p, 10_000);
+        set_mtime(&p, 1_000_000);
+        // Block 0 cached, block 1 missing: one call must not mix the two files.
+        let got = reader
+            .get_ranges(&p, std::slice::from_ref(&(4000..4200)))
+            .await
+            .unwrap();
+        assert!(got[0].iter().all(|&x| x == 2), "mixed bytes");
+        assert_eq!(reader.handles.opens(), 2);
+    }
+
+    #[tokio::test]
     async fn restart_with_blocks_reads_new_file() {
         let (_dir, p, reader) = setup_blocks(10_000);
         reader

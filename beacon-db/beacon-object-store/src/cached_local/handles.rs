@@ -14,15 +14,8 @@ use super::version::FileVersion;
 /// The store name in `object_store::Error::Generic`.
 pub(super) const STORE: &str = "LocalFileSystem";
 
-/// The maximum number of paths whose epoch the cache keeps.
-const MAX_EPOCH_PATHS: u64 = 65536;
-
-/// The source of handle epochs. Epochs are never reused.
+/// The source of handle epochs. Each open takes a new one; epochs are never reused.
 static NEXT_EPOCH: AtomicU64 = AtomicU64::new(1);
-
-fn fresh_epoch() -> u64 {
-    NEXT_EPOCH.fetch_add(1, Ordering::Relaxed)
-}
 
 /// A callback for a path whose cached handle became stale or was invalidated.
 pub(crate) type OnChange = Arc<dyn Fn(&Path) + Send + Sync>;
@@ -34,7 +27,7 @@ pub(crate) struct OpenFile {
     pub file: std::fs::File,
     /// The file version at open time.
     pub version: FileVersion,
-    /// The epoch of the path when the open started. Each invalidation of the path ends it.
+    /// The epoch of this open. No other handle has it.
     pub epoch: u64,
     /// The last version check, in microseconds since the `HandleCache` start.
     checked_at: AtomicU64,
@@ -90,8 +83,6 @@ fn map_io_error(path: &Path, e: io::Error) -> LoadError {
 /// A bounded cache of open file handles, keyed by filesystem path.
 pub(crate) struct HandleCache {
     cache: Cache<PathBuf, Arc<OpenFile>>,
-    /// The current epoch of each path.
-    epochs: moka::sync::Cache<PathBuf, u64>,
     revalidate_after: Duration,
     on_change: Option<OnChange>,
     opens: Arc<AtomicU64>,
@@ -110,7 +101,6 @@ impl HandleCache {
                 .max_capacity(opts.max_open_files)
                 .time_to_idle(opts.handle_idle)
                 .build(),
-            epochs: moka::sync::Cache::new(MAX_EPOCH_PATHS),
             revalidate_after: opts.revalidate_after,
             on_change,
             opens: Arc::new(AtomicU64::new(0)),
@@ -137,10 +127,8 @@ impl HandleCache {
             .await
     }
 
-    /// Gives `path` a new epoch, drops its cached handle and runs `on_change`.
+    /// Drops the cached handle of `path` and runs `on_change`.
     pub async fn invalidate(&self, path: &Path) {
-        // The new epoch comes first, so that no open after the drop takes the old one.
-        self.epochs.insert(path.to_path_buf(), fresh_epoch());
         self.cache.invalidate(path).await;
         if let Some(on_change) = &self.on_change {
             on_change(path);
@@ -239,15 +227,11 @@ impl HandleCache {
         let owned = path.to_path_buf();
         let opens = self.opens.clone();
         let start = self.start;
-        let epochs = self.epochs.clone();
         self.cache
             .try_get_with_by_ref(path, async move {
-                // Taken before the open: an invalidation during the open ends this epoch.
-                let epoch = epochs.get_with_by_ref(&owned, fresh_epoch);
-                let opened =
-                    tokio::task::spawn_blocking(move || open(&owned, epoch, &opens, start))
-                        .await
-                        .map_err(|e| LoadError::Io(Arc::new(io::Error::other(e))))?;
+                let opened = tokio::task::spawn_blocking(move || open(&owned, &opens, start))
+                    .await
+                    .map_err(|e| LoadError::Io(Arc::new(io::Error::other(e))))?;
                 opened.map(Arc::new)
             })
             .await
@@ -256,7 +240,7 @@ impl HandleCache {
 }
 
 /// Opens the file at `path` and reads its version.
-fn open(path: &Path, epoch: u64, opens: &AtomicU64, start: Instant) -> Result<OpenFile, LoadError> {
+fn open(path: &Path, opens: &AtomicU64, start: Instant) -> Result<OpenFile, LoadError> {
     opens.fetch_add(1, Ordering::Relaxed);
     let file = std::fs::File::open(path).map_err(|e| map_io_error(path, e))?;
     let m = file.metadata().map_err(|e| map_io_error(path, e))?;
@@ -266,7 +250,7 @@ fn open(path: &Path, epoch: u64, opens: &AtomicU64, start: Instant) -> Result<Op
     Ok(OpenFile {
         file,
         version: FileVersion::from_metadata(&m),
-        epoch,
+        epoch: NEXT_EPOCH.fetch_add(1, Ordering::Relaxed),
         checked_at: AtomicU64::new(start.elapsed().as_micros() as u64),
         revalidating: tokio::sync::Mutex::new(()),
     })
@@ -456,7 +440,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn invalidation_gives_new_epoch() {
+    async fn every_open_gives_new_epoch() {
         let dir = tempfile::tempdir().unwrap();
         let a = dir.path().join("a.bin");
         let b = dir.path().join("b.bin");
@@ -470,9 +454,9 @@ mod tests {
         cache.invalidate(&a).await;
         let second = cache.get(&a).await.unwrap();
         assert!(second.epoch > first.epoch);
-        // An eviction is not an invalidation: the next open keeps the epoch.
+        // A removal without `invalidate`, as by eviction, also ends the epoch.
         cache.cache.invalidate(&a).await;
-        assert_eq!(cache.get(&a).await.unwrap().epoch, second.epoch);
+        assert!(cache.get(&a).await.unwrap().epoch > second.epoch);
     }
 
     #[tokio::test]
