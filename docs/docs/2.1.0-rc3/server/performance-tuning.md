@@ -92,12 +92,13 @@ The datasets store cache removes most of this cost. It has two parts:
 - **The handle cache** keeps files open between reads. Beacon then opens a file once for many reads.
 - **The block cache** keeps aligned blocks of file data in memory. It is off by default.
 
-[configuration.md](configuration.md#datasets-store-cache) gives the six settings and their defaults.
+[Datasets store cache](/docs/2.1.0-rc3/server/configuration#datasets-store-cache) gives the six
+settings and their defaults.
 
 ### When to turn the cache on
 
 - Turn the cache on when the datasets folder is on NFS or on an HDD.
-- On a local SSD or NVMe disk, you do not need the cache. It does not make reads slower there.
+- On a local SSD or NVMe disk, the handle cache helps a little. Keep the block cache off there.
 
 To turn on the handle cache, set `BEACON_DATASETS_CACHE_ENABLED=true`. In tests, reads with the
 handle cache were never slower than reads without the cache.
@@ -123,6 +124,11 @@ power of two.
 `BEACON_DATASETS_CACHE_BLOCK_CACHE_SIZE` sets the memory limit of the block cache. Add this value
 to the memory that you give to Beacon.
 
+Beacon keeps the cached blocks of a file only while the file handle stays in the cache. A handle
+closes when the handle cache is full, or after `BEACON_DATASETS_CACHE_HANDLE_IDLE_SECS` without a
+read. Beacon does not use the blocks of a closed handle again. With the block cache on, set
+`BEACON_DATASETS_CACHE_MAX_OPEN_FILES` above the number of files that your queries read together.
+
 ### When Beacon sees a changed file
 
 - A write through Beacon shows at once. Examples are a file upload and a file delete in the admin API.
@@ -137,8 +143,12 @@ keep both values. Examples are `rsync -t`, `cp -p`, and `touch -d` on a file wit
 ::: warning A change that keeps the size and the modification time
 Beacon does not see such a change. It reads the old data until the file handle leaves the cache.
 A handle leaves the cache after `BEACON_DATASETS_CACHE_HANDLE_IDLE_SECS` without a read, or when
-the cache is full. A file that Beacon reads without a pause keeps its handle. Restart Beacon, or
-change the size or the modification time of the file, to make Beacon see the change.
+the cache is full. A file that Beacon reads without a pause keeps its handle. To make Beacon see the
+change, do one of these steps:
+
+- Restart Beacon.
+- Change the size or the modification time of the file.
+- Write the file through Beacon. A file upload or a file delete removes the handle from the cache.
 :::
 
 ### File descriptor limit
@@ -146,6 +156,9 @@ change the size or the modification time of the file, to make Beacon see the cha
 Each cached handle holds one open file descriptor. Keep `BEACON_DATASETS_CACHE_MAX_OPEN_FILES` well
 below the file limit of the process (`ulimit -n`). Beacon also needs file descriptors for network
 connections, logs and the tables store.
+
+With the block cache on, a low `BEACON_DATASETS_CACHE_MAX_OPEN_FILES` also lowers the block cache
+hits. See [Block size](#block-size).
 
 ### Hidden `.nfs` files
 
