@@ -99,8 +99,8 @@ The datasets store cache removes most of this cost. It has two parts:
 - Turn the cache on when the datasets folder is on NFS or on an HDD.
 - On a local SSD or NVMe disk, you do not need the cache. It does not make reads slower there.
 
-To turn on the handle cache, set `BEACON_DATASETS_CACHE_ENABLED=true`. In tests on NFS, the handle
-cache made cold reads about 1.5 to 2.5 times faster. It made repeated reads 2 to 4 times faster.
+To turn on the handle cache, set `BEACON_DATASETS_CACHE_ENABLED=true`. In tests, reads with the
+handle cache were never slower than reads without the cache.
 
 ### Block size
 
