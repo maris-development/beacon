@@ -12,14 +12,12 @@ use super::CachedLocalOptions;
 use super::version::FileVersion;
 
 /// The store name in `object_store::Error::Generic`.
-const STORE: &str = "LocalFileSystem";
+pub(super) const STORE: &str = "LocalFileSystem";
 
 /// A callback for a path whose cached handle became stale or was invalidated.
-#[allow(dead_code)]
 pub(crate) type OnChange = Arc<dyn Fn(&Path) + Send + Sync>;
 
 /// An open file and the version it had when it was last checked.
-#[allow(dead_code)]
 #[derive(Debug)]
 pub(crate) struct OpenFile {
     /// The open file.
@@ -78,7 +76,6 @@ fn map_io_error(path: &Path, e: io::Error) -> LoadError {
 }
 
 /// A bounded cache of open file handles, keyed by filesystem path.
-#[allow(dead_code)]
 pub(crate) struct HandleCache {
     cache: Cache<PathBuf, Arc<OpenFile>>,
     revalidate_after: Duration,
@@ -87,7 +84,6 @@ pub(crate) struct HandleCache {
     start: Instant,
 }
 
-#[allow(dead_code)]
 impl HandleCache {
     /// Creates the cache. `on_change` runs for a path whose revalidation found a new
     /// version or a missing file, and for each [`HandleCache::invalidate`].
@@ -129,7 +125,7 @@ impl HandleCache {
         }
     }
 
-    /// The number of files this cache opened.
+    /// The number of open attempts of this cache.
     pub fn opens(&self) -> u64 {
         self.opens.load(Ordering::Relaxed)
     }
@@ -195,7 +191,11 @@ impl HandleCache {
                 self.invalidate(path).await;
                 Err(not_found(path, e).into())
             }
-            Err(e) => Err(LoadError::Io(Arc::new(e)).into()),
+            Err(e) => {
+                // A handle that cannot be checked must not keep the file open.
+                self.invalidate(path).await;
+                Err(LoadError::Io(Arc::new(e)).into())
+            }
         }
     }
 
@@ -324,11 +324,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("a.bin");
         std::fs::write(&p, b"abc").unwrap();
-        let cache = HandleCache::new(&opts(Duration::from_millis(50)), None);
+        let cache = HandleCache::new(&opts(Duration::from_millis(500)), None);
         assert_eq!(cache.get(&p).await.unwrap().version.size, 3);
         replace(&p, b"abcdef");
         assert_eq!(cache.get(&p).await.unwrap().version.size, 3);
-        tokio::time::sleep(Duration::from_millis(60)).await;
+        tokio::time::sleep(Duration::from_millis(600)).await;
         assert_eq!(cache.get(&p).await.unwrap().version.size, 6);
         assert_eq!(cache.opens(), 2);
     }

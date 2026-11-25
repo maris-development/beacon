@@ -47,6 +47,9 @@ impl CachedLocalOptions {
         if self.max_open_files == 0 {
             return Err("max_open_files must be at least 1".to_string());
         }
+        if self.stream_chunk == 0 {
+            return Err("stream_chunk must be at least 1".to_string());
+        }
         let b = self.block_size;
         if b != 0 && !(b.is_power_of_two() && (MIN_BLOCK_SIZE..=MAX_BLOCK_SIZE).contains(&b)) {
             return Err(format!(

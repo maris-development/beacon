@@ -37,13 +37,11 @@ impl FileVersion {
     }
 
     /// The ETag: the stock `LocalFileSystem` format with inode 0.
-    #[allow(dead_code)]
     pub(crate) fn e_tag(&self) -> String {
         format!("0-{:x}-{:x}", self.mtime_micros, self.size)
     }
 
     /// The object metadata of the file at `location`.
-    #[allow(dead_code)]
     pub(crate) fn object_meta(&self, location: Path) -> ObjectMeta {
         ObjectMeta {
             location,
@@ -101,6 +99,11 @@ mod tests {
         }
         let o = CachedLocalOptions {
             max_open_files: 0,
+            ..Default::default()
+        };
+        assert!(o.validate().is_err());
+        let o = CachedLocalOptions {
+            stream_chunk: 0,
             ..Default::default()
         };
         assert!(o.validate().is_err());
