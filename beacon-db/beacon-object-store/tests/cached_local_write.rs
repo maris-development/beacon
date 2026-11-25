@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use beacon_object_store::cached_local::{CachedLocalFileSystem, CachedLocalOptions};
-use futures::TryStreamExt;
+use futures::{StreamExt, TryStreamExt};
 use object_store::path::Path;
 use object_store::{ObjectStore, ObjectStoreExt, PutPayload};
 use support::{random_file, temp_store};
@@ -77,6 +77,42 @@ async fn delete_shows_at_once() {
     random_file(dir.path(), "a.bin", 10_000);
     read_all(&ours, "a.bin").await;
     ours.delete(&Path::from("a.bin")).await.unwrap();
+    let err = ours.get(&Path::from("a.bin")).await.unwrap_err();
+    assert!(is_not_found(&err), "{err}");
+}
+
+#[tokio::test]
+async fn delete_stream_answers_each_input_in_order() {
+    let (dir, ours, _) = temp_store(opts());
+    random_file(dir.path(), "a.bin", 10_000);
+    read_all(&ours, "a.bin").await;
+    let input: Vec<object_store::Result<Path>> = vec![
+        Ok(Path::from("missing.bin")),
+        Err(object_store::Error::Generic {
+            store: "test",
+            source: "bad input".into(),
+        }),
+        Ok(Path::from("a.bin")),
+    ];
+    let results: Vec<_> = ours
+        .delete_stream(futures::stream::iter(input).boxed())
+        .collect()
+        .await;
+    assert_eq!(results.len(), 3);
+    assert!(
+        matches!(&results[0], Err(e) if is_not_found(e)),
+        "{:?}",
+        results[0]
+    );
+    assert!(
+        matches!(
+            &results[1],
+            Err(object_store::Error::Generic { store: "test", .. })
+        ),
+        "{:?}",
+        results[1]
+    );
+    assert_eq!(results[2].as_ref().unwrap(), &Path::from("a.bin"));
     let err = ours.get(&Path::from("a.bin")).await.unwrap_err();
     assert!(is_not_found(&err), "{err}");
 }

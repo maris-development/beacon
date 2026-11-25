@@ -72,6 +72,11 @@ impl BlockCache {
         self.cache.weighted_size()
     }
 
+    /// Removes the blocks that are past the capacity or that an invalidation dropped.
+    pub async fn run_pending_tasks(&self) {
+        self.cache.run_pending_tasks().await;
+    }
+
     /// Drops all blocks of `path`, of all versions and epochs.
     pub fn invalidate_path(&self, path: &Path) {
         let path = path.to_path_buf();
@@ -183,9 +188,7 @@ fn copy_out(blocks: &[Bytes], offset: usize, len: usize) -> Result<Bytes, Arc<io
             format!("expected {} bytes, read {available}", offset + len),
         )));
     }
-    if blocks[0].len() >= offset + len {
-        return Ok(blocks[0].slice(offset..offset + len));
-    }
+    // A copy, so that a kept result does not hold a whole cached block.
     let mut out = BytesMut::with_capacity(len);
     let mut skip = offset;
     for block in blocks {
@@ -235,6 +238,42 @@ mod tests {
             blocks.weighted_size()
         );
         assert_eq!(blocks.counters(), (0, 128));
+    }
+
+    #[tokio::test]
+    async fn result_does_not_share_cached_block() {
+        const B: u64 = 1 << 20;
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("a.bin");
+        std::fs::write(&p, vec![3u8; 2 << 20]).unwrap();
+        let handles = HandleCache::new(&CachedLocalOptions::default(), None);
+        let file = handles.get(&p).await.unwrap();
+        let path = Arc::new(p);
+        let blocks = BlockCache::new(B, 4 << 20);
+        let got = blocks
+            .read(&path, &file, 4096..8192, |r| {
+                let f = file.clone();
+                async move {
+                    let mut buf = vec![0u8; (r.end - r.start) as usize];
+                    super::super::read::read_exact_at(&f.file, &mut buf, r.start)?;
+                    Ok(Bytes::from(buf))
+                }
+            })
+            .await
+            .unwrap();
+        assert_eq!(got.len(), 4096);
+        let key = BlockKey {
+            file: path.clone(),
+            version: file.version,
+            epoch: file.epoch,
+            index: 0,
+        };
+        let block = blocks.cache.get(&key).await.expect("block 0 is cached");
+        assert_eq!(block.len() as u64, B);
+        assert!(
+            !block.as_ptr_range().contains(&got.as_ptr()),
+            "the result shares the cached block"
+        );
     }
 
     #[test]

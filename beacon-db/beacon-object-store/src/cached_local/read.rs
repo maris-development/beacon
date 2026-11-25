@@ -149,6 +149,14 @@ impl Reader {
         )
     }
 
+    /// Closes idle handles and removes dropped blocks.
+    pub async fn run_pending_tasks(&self) {
+        self.handles.run_pending_tasks().await;
+        if let Some(blocks) = &self.blocks {
+            blocks.run_pending_tasks().await;
+        }
+    }
+
     /// The block cache hits and misses, 0 when the block cache is off.
     pub fn block_counters(&self) -> (u64, u64) {
         self.blocks.as_ref().map_or((0, 0), |b| b.counters())
@@ -249,7 +257,8 @@ impl Reader {
 
     /// Streams `range` of `file` in pieces of at most `stream_chunk` bytes.
     ///
-    /// A stale handle moves to a new handle only when the file version is the same.
+    /// A stale handle ends the stream with the read error, so that one call never joins
+    /// bytes of two handles. The next call opens the file again.
     fn stream(
         self: &Arc<Self>,
         path: PathBuf,
@@ -258,31 +267,23 @@ impl Reader {
     ) -> BoxStream<'static, object_store::Result<Bytes>> {
         let reader = self.clone();
         let end = range.end;
-        futures::stream::try_unfold((range.start, file), move |(pos, file)| {
+        futures::stream::try_unfold(range.start, move |pos| {
             let reader = reader.clone();
             let path = path.clone();
+            let file = file.clone();
             async move {
                 if pos >= end {
                     return Ok(None);
                 }
                 let next = end.min(pos.saturating_add(reader.stream_chunk));
-                let (bytes, file) = match reader.read(&path, &file, pos..next).await {
-                    Ok(bytes) => (bytes, file),
+                match reader.read(&path, &file, pos..next).await {
+                    Ok(bytes) => Ok(Some((bytes, next))),
                     Err(ReadError::Stale(e)) => {
-                        let fresh = reader.reopen(&path, &file).await?;
-                        // The returned metadata describes this version only.
-                        if fresh.version != file.version {
-                            return Err(read_error(&path, e));
-                        }
-                        let bytes = reader
-                            .read(&path, &fresh, pos..next)
-                            .await
-                            .map_err(|e| e.into_store(&path))?;
-                        (bytes, fresh)
+                        reader.handles.invalidate_if_current(&path, &file).await;
+                        Err(read_error(&path, e))
                     }
-                    Err(e) => return Err(e.into_store(&path)),
-                };
-                Ok(Some((bytes, (next, file))))
+                    Err(e) => Err(e.into_store(&path)),
+                }
             }
         })
         .boxed()
@@ -457,11 +458,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stream_retries_later_piece_on_same_version() {
+    async fn stream_fails_stale_later_piece() {
         let (_dir, p, reader) = setup(100, 300);
         fail(&reader, &[false, true]);
+        let err = get(&reader, &p, None).await.bytes().await.unwrap_err();
+        assert!(
+            matches!(err, object_store::Error::Generic { store: STORE, .. }),
+            "{err}"
+        );
+        assert_eq!(reader.handles.opens(), 1);
+        // The stale handle is gone, so the next call opens the file again.
         let bytes = get(&reader, &p, None).await.bytes().await.unwrap();
         assert_eq!(&bytes[..], &[1u8; 300][..]);
+        assert_eq!(reader.handles.opens(), 2);
     }
 
     /// A reader with 4 KiB blocks and a file of `len` ones.
@@ -573,23 +582,5 @@ mod tests {
         let (_dir, p, reader) = setup(0, 300);
         let bytes = get(&reader, &p, None).await.bytes().await.unwrap();
         assert_eq!(&bytes[..], &[1u8; 300][..]);
-    }
-
-    #[tokio::test]
-    async fn stream_fails_later_piece_on_new_version() {
-        let (_dir, p, reader) = setup(100, 300);
-        fail(&reader, &[false, true]);
-        let r = get(&reader, &p, None).await;
-        replace(&p, 300);
-        // Same size, so make sure the mtime differs.
-        let f = std::fs::File::options().write(true).open(&p).unwrap();
-        f.set_modified(std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1))
-            .unwrap();
-        drop(f);
-        let err = r.bytes().await.unwrap_err();
-        assert!(
-            matches!(err, object_store::Error::Generic { store: STORE, .. }),
-            "{err}"
-        );
     }
 }

@@ -35,7 +35,7 @@ pub struct CacheStats {
     pub block_hits: u64,
     /// The blocks loaded from disk into the block cache.
     pub block_misses: u64,
-    /// The positional reads from disk.
+    /// The positional reads from disk, failed reads included.
     pub disk_reads: u64,
     /// The bytes of the positional reads from disk.
     pub disk_bytes: u64,
@@ -54,6 +54,7 @@ impl CachedLocalFileSystem {
         let reader = Arc::new(Reader::new(&opts));
         if tokio::runtime::Handle::try_current().is_ok() {
             spawn_stats_log(Arc::downgrade(&reader), STATS_LOG_INTERVAL);
+            spawn_maintenance(Arc::downgrade(&reader), maintenance_interval(&opts));
         }
         Self {
             inner,
@@ -136,6 +137,28 @@ fn spawn_stats_log(reader: Weak<Reader>, every: Duration) -> tokio::task::JoinHa
                 );
                 last = stats;
             }
+        }
+    })
+}
+
+/// The time between two maintenance runs: the handle idle time, from 1 s to 5 s.
+fn maintenance_interval(opts: &CachedLocalOptions) -> Duration {
+    opts.handle_idle
+        .clamp(Duration::from_secs(1), Duration::from_secs(5))
+}
+
+/// Closes idle handles and removes dropped blocks every `every`, until the store drops.
+///
+/// The caches run this work only on a cache call, so an idle server needs this task.
+fn spawn_maintenance(reader: Weak<Reader>, every: Duration) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut ticks = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
+        loop {
+            ticks.tick().await;
+            let Some(reader) = reader.upgrade() else {
+                return;
+            };
+            reader.run_pending_tasks().await;
         }
     })
 }
@@ -346,6 +369,7 @@ impl ObjectStore for CachedLocalFileSystem {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::Ordering;
     use std::sync::mpsc;
     use std::time::Duration;
 
@@ -362,6 +386,83 @@ mod tests {
             .await
             .expect("stats log task still runs")
             .unwrap();
+    }
+
+    #[test]
+    fn maintenance_interval_is_one_to_five_seconds() {
+        let interval = |handle_idle| {
+            maintenance_interval(&CachedLocalOptions {
+                handle_idle,
+                ..Default::default()
+            })
+        };
+        assert_eq!(interval(Duration::from_millis(100)), Duration::from_secs(1));
+        assert_eq!(interval(Duration::from_secs(3)), Duration::from_secs(3));
+        assert_eq!(interval(Duration::from_secs(30)), Duration::from_secs(5));
+    }
+
+    #[tokio::test]
+    async fn idle_handle_closes_without_store_calls() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("a.bin");
+        std::fs::write(&p, vec![1u8; 1000]).unwrap();
+        let opts = CachedLocalOptions {
+            handle_idle: Duration::from_millis(100),
+            block_size: 4096,
+            ..Default::default()
+        };
+        let inner = LocalFileSystem::new_with_prefix(dir.path()).unwrap();
+        let store = CachedLocalFileSystem::new(inner, opts);
+        store.get_range(&Path::from("a.bin"), 0..10).await.unwrap();
+        let handle = Arc::downgrade(&store.reader.handles.peek(&p).await.unwrap());
+        assert!(handle.upgrade().is_some());
+        // The handle expires after 100 ms; the maintenance task runs after 1 s.
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        assert_eq!(store.reader.handles.entry_count(), 0);
+        assert!(handle.upgrade().is_none(), "the file is still open");
+        std::fs::remove_file(&p).unwrap();
+    }
+
+    #[tokio::test]
+    async fn maintenance_ends_with_the_store() {
+        let reader = Arc::new(Reader::new(&CachedLocalOptions::default()));
+        let task = spawn_maintenance(Arc::downgrade(&reader), Duration::from_millis(10));
+        drop(reader);
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("maintenance task still runs")
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn writes_to_unread_paths_drop_no_blocks() {
+        let dir = tempfile::tempdir().unwrap();
+        let opts = CachedLocalOptions {
+            block_size: 4096,
+            ..Default::default()
+        };
+        let inner = LocalFileSystem::new_with_prefix(dir.path()).unwrap();
+        let store = CachedLocalFileSystem::new(inner, opts);
+        for i in 0..500 {
+            store
+                .put(&Path::from(format!("f{i}.bin")), vec![1u8; 10].into())
+                .await
+                .unwrap();
+        }
+        for i in 0..500 {
+            store
+                .delete(&Path::from(format!("f{i}.bin")))
+                .await
+                .unwrap();
+        }
+        let changes = || store.reader.handles.changes.load(Ordering::Relaxed);
+        assert_eq!(changes(), 0);
+        // A write to a read path drops its blocks once.
+        let loc = Path::from("a.bin");
+        store.put(&loc, vec![1u8; 10].into()).await.unwrap();
+        store.get_range(&loc, 0..10).await.unwrap();
+        store.put(&loc, vec![2u8; 10].into()).await.unwrap();
+        assert_eq!(changes(), 1);
     }
 
     #[tokio::test]

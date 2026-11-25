@@ -101,6 +101,9 @@ pub(crate) struct HandleCache {
     /// Test seam: the next revalidation stat fails with a permission error.
     #[cfg(test)]
     fail_stat: std::sync::atomic::AtomicBool,
+    /// Test seam: the number of `on_change` runs.
+    #[cfg(test)]
+    pub(crate) changes: AtomicU64,
     /// Test seam: the next open signals the sender after the open and waits on the receiver.
     #[cfg(test)]
     pub(crate) pause_after_open: parking_lot::Mutex<Option<OpenGate>>,
@@ -111,8 +114,8 @@ pub(crate) struct HandleCache {
 pub(crate) type OpenGate = (std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>);
 
 impl HandleCache {
-    /// Creates the cache. `on_change` runs for a path whose revalidation found a new
-    /// version or a missing file, and for each [`HandleCache::invalidate`].
+    /// Creates the cache. `on_change` runs for a path whose cached handle
+    /// [`HandleCache::invalidate`] removes.
     pub fn new(opts: &CachedLocalOptions, on_change: Option<OnChange>) -> Self {
         Self {
             cache: Cache::builder()
@@ -127,6 +130,8 @@ impl HandleCache {
             start: Instant::now(),
             #[cfg(test)]
             fail_stat: Default::default(),
+            #[cfg(test)]
+            changes: Default::default(),
             #[cfg(test)]
             pause_after_open: Default::default(),
         }
@@ -154,14 +159,28 @@ impl HandleCache {
         self.cache.get(path).await
     }
 
-    /// Drops the cached handle of `path`, also one that an open in progress inserts later,
-    /// and runs `on_change`.
+    /// Drops the cached handle of `path`, also one that an open in progress inserts later.
+    /// Runs `on_change` when a cached handle was removed.
     pub async fn invalidate(&self, path: &Path) {
         self.generations[self.slot(path)].fetch_add(1, Ordering::SeqCst);
-        self.cache.invalidate(path).await;
-        if let Some(on_change) = &self.on_change {
-            on_change(path);
+        if self.cache.remove(path).await.is_some() {
+            #[cfg(test)]
+            self.changes.fetch_add(1, Ordering::Relaxed);
+            if let Some(on_change) = &self.on_change {
+                on_change(path);
+            }
         }
+    }
+
+    /// Closes the handles that are idle or past the capacity.
+    pub async fn run_pending_tasks(&self) {
+        self.cache.run_pending_tasks().await;
+    }
+
+    /// The number of cached handles.
+    #[cfg(test)]
+    pub(crate) fn entry_count(&self) -> u64 {
+        self.cache.entry_count()
     }
 
     /// The generation slot of `path`.
@@ -176,6 +195,8 @@ impl HandleCache {
     }
 
     /// Drops `file`, an outdated handle of `path`, if it is cached, without a new generation.
+    ///
+    /// Does not run `on_change`: the outdated slot can belong to another path.
     async fn discard(&self, path: &Path, file: &Arc<OpenFile>) {
         if self
             .cache
@@ -184,9 +205,6 @@ impl HandleCache {
             .is_some_and(|current| Arc::ptr_eq(&current, file))
         {
             self.cache.invalidate(path).await;
-            if let Some(on_change) = &self.on_change {
-                on_change(path);
-            }
         }
     }
 
@@ -504,6 +522,8 @@ mod tests {
         // An unchanged file does not run on_change.
         cache.get_fresh(&a).await.unwrap();
         cache.get_fresh(&b).await.unwrap();
+        // A path with no cached handle does not run on_change.
+        cache.invalidate(&dir.path().join("never-read.bin")).await;
         assert_eq!(*seen.lock(), vec![a, b]);
     }
 
