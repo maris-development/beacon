@@ -9,18 +9,16 @@ use object_store::path::Path;
 /// The version of a local file, as `LocalFileSystem` sees it.
 ///
 /// Two versions are equal when the size and the mtime are equal. The inode is not part of it.
-#[allow(dead_code)]
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub(crate) struct FileVersion {
     /// The file length in bytes.
     pub size: u64,
-    /// The mtime in microseconds since the UNIX epoch, 0 when unknown.
+    /// The mtime in microseconds since the UNIX epoch, 0 before the UNIX epoch.
     pub mtime_micros: u128,
     /// The mtime as UTC.
     pub last_modified: DateTime<Utc>,
 }
 
-#[allow(dead_code)]
 impl FileVersion {
     /// Reads the version from file metadata, with the same conversions as `LocalFileSystem`.
     pub(crate) fn from_metadata(m: &std::fs::Metadata) -> FileVersion {
@@ -39,11 +37,13 @@ impl FileVersion {
     }
 
     /// The ETag: the stock `LocalFileSystem` format with inode 0.
+    #[allow(dead_code)]
     pub(crate) fn e_tag(&self) -> String {
         format!("0-{:x}-{:x}", self.mtime_micros, self.size)
     }
 
     /// The object metadata of the file at `location`.
+    #[allow(dead_code)]
     pub(crate) fn object_meta(&self, location: Path) -> ObjectMeta {
         ObjectMeta {
             location,
