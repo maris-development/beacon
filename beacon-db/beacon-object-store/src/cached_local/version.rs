@@ -38,7 +38,7 @@ impl FileVersion {
 
     /// The ETag: the stock `LocalFileSystem` format with inode 0.
     pub(crate) fn e_tag(&self) -> String {
-        format!("0-{:x}-{:x}", self.mtime_micros, self.size)
+        e_tag(self.mtime_micros, self.size)
     }
 
     /// The object metadata of the file at `location`.
@@ -51,6 +51,17 @@ impl FileVersion {
             version: None,
         }
     }
+}
+
+fn e_tag(mtime_micros: u128, size: u64) -> String {
+    format!("0-{mtime_micros:x}-{size:x}")
+}
+
+/// The ETag of a listed file, equal to the one of [`FileVersion::e_tag`] for that file.
+pub(crate) fn listed_e_tag(meta: &ObjectMeta) -> String {
+    // `FileVersion` counts a time before the UNIX epoch as 0.
+    let mtime_micros = u128::try_from(meta.last_modified.timestamp_micros()).unwrap_or(0);
+    e_tag(mtime_micros, meta.size)
 }
 
 #[cfg(test)]
@@ -107,6 +118,22 @@ mod tests {
             ..Default::default()
         };
         assert!(o.validate().is_err());
+    }
+
+    #[test]
+    fn listed_e_tag_uses_the_version_format() {
+        let meta = |last_modified| ObjectMeta {
+            location: Path::from("a.bin"),
+            last_modified,
+            size: 300,
+            e_tag: Some("12-34-12c".to_string()),
+            version: None,
+        };
+        let after = DateTime::from_timestamp_micros(0x5f00_0000_1234).unwrap();
+        assert_eq!(listed_e_tag(&meta(after)), "0-5f0000001234-12c");
+        // Before the UNIX epoch the mtime is 0, as in `FileVersion`.
+        let before = DateTime::from_timestamp_micros(-5_000_000).unwrap();
+        assert_eq!(listed_e_tag(&meta(before)), "0-0-12c");
     }
 
     #[test]

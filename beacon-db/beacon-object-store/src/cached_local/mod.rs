@@ -80,7 +80,8 @@ impl CachedLocalFileSystem {
         self.evictor().evict(location).await
     }
 
-    /// Hides `.nfs` files of `entries` and evicts each listed file whose cached version differs.
+    /// Hides `.nfs` files of `entries`, gives each the ETag of `head`, and evicts each listed
+    /// file whose cached version differs.
     fn check_listing(
         &self,
         entries: BoxStream<'static, Result<ObjectMeta>>,
@@ -88,11 +89,12 @@ impl CachedLocalFileSystem {
         let evictor = self.evictor();
         entries
             .try_filter(|meta| std::future::ready(!is_nfs(&meta.location)))
-            .and_then(move |meta| {
+            .and_then(move |mut meta| {
                 let evictor = evictor.clone();
                 // Only in-memory work: a cache lookup and, for a changed file, an eviction.
                 async move {
                     evictor.evict_if_changed(&meta).await;
+                    meta.e_tag = Some(version::listed_e_tag(&meta));
                     Ok(meta)
                 }
             })
@@ -344,8 +346,9 @@ impl ObjectStore for CachedLocalFileSystem {
         result.objects.retain(|meta| !is_nfs(&meta.location));
         result.common_prefixes.retain(|p| !is_nfs(p));
         let evictor = self.evictor();
-        for meta in &result.objects {
+        for meta in &mut result.objects {
             evictor.evict_if_changed(meta).await;
+            meta.e_tag = Some(version::listed_e_tag(meta));
         }
         Ok(result)
     }

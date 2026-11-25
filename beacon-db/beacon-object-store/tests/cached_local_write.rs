@@ -291,3 +291,34 @@ async fn file_that_grew_reads_at_once() {
         .unwrap();
     assert_eq!(&got[..], &data[8000..15_000]);
 }
+
+#[tokio::test]
+async fn listed_e_tag_matches_head() {
+    let (dir, store, _stock) = temp_store(opts());
+    random_file(dir.path(), "a.bin", 5000);
+    std::fs::create_dir(dir.path().join("sub")).unwrap();
+    random_file(&dir.path().join("sub"), "b.bin", 3000);
+
+    let listed: Vec<_> = store.list(None).try_collect().await.unwrap();
+    let delimited = store
+        .list_with_delimiter(Some(&Path::from("sub")))
+        .await
+        .unwrap();
+    assert_eq!(listed.len(), 2);
+    assert_eq!(delimited.objects.len(), 1);
+    for meta in listed.iter().chain(&delimited.objects) {
+        let head = store.head(&meta.location).await.unwrap();
+        assert_eq!(meta.e_tag, head.e_tag, "{}", meta.location);
+    }
+
+    // A conditional read with the listed tag succeeds.
+    let a = listed
+        .iter()
+        .find(|m| m.location == Path::from("a.bin"))
+        .unwrap();
+    let options = object_store::GetOptions {
+        if_match: a.e_tag.clone(),
+        ..Default::default()
+    };
+    store.get_opts(&a.location, options).await.unwrap();
+}
