@@ -304,3 +304,43 @@ impl ObjectStore for CachedLocalFileSystem {
         result
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    use object_store::ObjectStoreExt;
+
+    use super::*;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn open_racing_put_is_not_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.bin"), vec![b'A'; 1000]).unwrap();
+        let opts = CachedLocalOptions {
+            revalidate_after: Duration::from_secs(3600),
+            ..Default::default()
+        };
+        let inner = LocalFileSystem::new_with_prefix(dir.path()).unwrap();
+        let store = Arc::new(CachedLocalFileSystem::new(inner, opts));
+        let loc = Path::from("a.bin");
+        let (opened_tx, opened_rx) = mpsc::channel();
+        let (resume_tx, resume_rx) = mpsc::channel();
+        *store.reader.handles.pause_after_open.lock() = Some((opened_tx, resume_rx));
+        let first = tokio::spawn({
+            let (store, loc) = (store.clone(), loc.clone());
+            async move { store.get_range(&loc, 0..1000).await.unwrap() }
+        });
+        // The load has opened the old file and waits.
+        tokio::task::spawn_blocking(move || opened_rx.recv().unwrap())
+            .await
+            .unwrap();
+        // Same length, so that only an eviction can show the new bytes.
+        store.put(&loc, vec![b'B'; 1000].into()).await.unwrap();
+        resume_tx.send(()).unwrap();
+        first.await.unwrap();
+        let got = store.get_range(&loc, 0..1000).await.unwrap();
+        assert!(got.iter().all(|&x| x == b'B'), "stale bytes after put");
+    }
+}

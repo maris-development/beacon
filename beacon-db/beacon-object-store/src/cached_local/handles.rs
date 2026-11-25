@@ -29,6 +29,10 @@ pub(crate) struct OpenFile {
     pub version: FileVersion,
     /// The epoch of this open. No other handle has it.
     pub epoch: u64,
+    /// The generation slot of the path.
+    slot: usize,
+    /// The slot generation read before the open.
+    generation: u64,
     /// The last version check, in microseconds since the `HandleCache` start.
     checked_at: AtomicU64,
     /// Lets one revalidation of this handle run at a time.
@@ -80,9 +84,16 @@ fn map_io_error(path: &Path, e: io::Error) -> LoadError {
     LoadError::Io(Arc::new(e))
 }
 
+/// The number of invalidation generation slots of a [`HandleCache`].
+const GENERATION_SLOTS: usize = 4096;
+
 /// A bounded cache of open file handles, keyed by filesystem path.
 pub(crate) struct HandleCache {
     cache: Cache<PathBuf, Arc<OpenFile>>,
+    /// Invalidation counters, one per path hash slot. A handle opened before the last
+    /// invalidation of its slot is never returned.
+    generations: Arc<[AtomicU64]>,
+    hasher: std::hash::RandomState,
     revalidate_after: Duration,
     on_change: Option<OnChange>,
     opens: Arc<AtomicU64>,
@@ -90,7 +101,14 @@ pub(crate) struct HandleCache {
     /// Test seam: the next revalidation stat fails with a permission error.
     #[cfg(test)]
     fail_stat: std::sync::atomic::AtomicBool,
+    /// Test seam: the next open signals the sender after the open and waits on the receiver.
+    #[cfg(test)]
+    pub(crate) pause_after_open: parking_lot::Mutex<Option<OpenGate>>,
 }
+
+/// The signal and the resume channel of a paused open.
+#[cfg(test)]
+pub(crate) type OpenGate = (std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>);
 
 impl HandleCache {
     /// Creates the cache. `on_change` runs for a path whose revalidation found a new
@@ -101,12 +119,16 @@ impl HandleCache {
                 .max_capacity(opts.max_open_files)
                 .time_to_idle(opts.handle_idle)
                 .build(),
+            generations: (0..GENERATION_SLOTS).map(|_| AtomicU64::new(0)).collect(),
+            hasher: Default::default(),
             revalidate_after: opts.revalidate_after,
             on_change,
             opens: Arc::new(AtomicU64::new(0)),
             start: Instant::now(),
             #[cfg(test)]
             fail_stat: Default::default(),
+            #[cfg(test)]
+            pause_after_open: Default::default(),
         }
     }
 
@@ -132,11 +154,39 @@ impl HandleCache {
         self.cache.get(path).await
     }
 
-    /// Drops the cached handle of `path` and runs `on_change`.
+    /// Drops the cached handle of `path`, also one that an open in progress inserts later,
+    /// and runs `on_change`.
     pub async fn invalidate(&self, path: &Path) {
+        self.generations[self.slot(path)].fetch_add(1, Ordering::SeqCst);
         self.cache.invalidate(path).await;
         if let Some(on_change) = &self.on_change {
             on_change(path);
+        }
+    }
+
+    /// The generation slot of `path`.
+    fn slot(&self, path: &Path) -> usize {
+        use std::hash::BuildHasher;
+        (self.hasher.hash_one(path) % GENERATION_SLOTS as u64) as usize
+    }
+
+    /// True when `file` was opened before the last invalidation of its slot.
+    fn is_outdated(&self, file: &OpenFile) -> bool {
+        self.generations[file.slot].load(Ordering::SeqCst) != file.generation
+    }
+
+    /// Drops `file`, an outdated handle of `path`, if it is cached, without a new generation.
+    async fn discard(&self, path: &Path, file: &Arc<OpenFile>) {
+        if self
+            .cache
+            .get(path)
+            .await
+            .is_some_and(|current| Arc::ptr_eq(&current, file))
+        {
+            self.cache.invalidate(path).await;
+            if let Some(on_change) = &self.on_change {
+                on_change(path);
+            }
         }
     }
 
@@ -163,8 +213,19 @@ impl HandleCache {
         path: &Path,
         fresh: impl Fn(u64, u64) -> bool,
     ) -> Result<Arc<OpenFile>, object_store::Error> {
+        let called_at = self.generations[self.slot(path)].load(Ordering::SeqCst);
         loop {
             let file = self.load(path).await?;
+            if self.is_outdated(&file) {
+                self.discard(path, &file).await;
+                // An open after all invalidations before this call can serve this call, uncached.
+                if file.generation >= called_at
+                    && fresh(file.checked_at.load(Ordering::Acquire), self.now())
+                {
+                    return Ok(file);
+                }
+                continue;
+            }
             if fresh(file.checked_at.load(Ordering::Acquire), self.now())
                 || self.revalidate(path, &file, &fresh).await?
             {
@@ -232,11 +293,25 @@ impl HandleCache {
         let owned = path.to_path_buf();
         let opens = self.opens.clone();
         let start = self.start;
+        let slot = self.slot(path);
+        let generations = self.generations.clone();
+        #[cfg(test)]
+        let gate = self.pause_after_open.lock().take();
         self.cache
             .try_get_with_by_ref(path, async move {
-                let opened = tokio::task::spawn_blocking(move || open(&owned, &opens, start))
-                    .await
-                    .map_err(|e| LoadError::Io(Arc::new(io::Error::other(e))))?;
+                // Read before the open, so that a later invalidation outdates this handle.
+                let generation = generations[slot].load(Ordering::SeqCst);
+                let opened = tokio::task::spawn_blocking(move || {
+                    let opened = open(&owned, &opens, start, slot, generation);
+                    #[cfg(test)]
+                    if let Some((opened_tx, resume_rx)) = gate {
+                        opened_tx.send(()).unwrap();
+                        resume_rx.recv().unwrap();
+                    }
+                    opened
+                })
+                .await
+                .map_err(|e| LoadError::Io(Arc::new(io::Error::other(e))))?;
                 opened.map(Arc::new)
             })
             .await
@@ -245,7 +320,13 @@ impl HandleCache {
 }
 
 /// Opens the file at `path` and reads its version.
-fn open(path: &Path, opens: &AtomicU64, start: Instant) -> Result<OpenFile, LoadError> {
+fn open(
+    path: &Path,
+    opens: &AtomicU64,
+    start: Instant,
+    slot: usize,
+    generation: u64,
+) -> Result<OpenFile, LoadError> {
     opens.fetch_add(1, Ordering::Relaxed);
     let file = std::fs::File::open(path).map_err(|e| map_io_error(path, e))?;
     let m = file.metadata().map_err(|e| map_io_error(path, e))?;
@@ -256,6 +337,8 @@ fn open(path: &Path, opens: &AtomicU64, start: Instant) -> Result<OpenFile, Load
         file,
         version: FileVersion::from_metadata(&m),
         epoch: NEXT_EPOCH.fetch_add(1, Ordering::Relaxed),
+        slot,
+        generation,
         checked_at: AtomicU64::new(start.elapsed().as_micros() as u64),
         revalidating: tokio::sync::Mutex::new(()),
     })
