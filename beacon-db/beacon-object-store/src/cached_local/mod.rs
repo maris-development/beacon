@@ -1,5 +1,6 @@
 //! A local store wrapper that keeps file handles open and caches blocks.
 
+mod blocks;
 mod handles;
 mod options;
 mod read;
@@ -27,9 +28,9 @@ use read::Reader;
 pub struct CacheStats {
     /// The open attempts of the handle cache.
     pub opens: u64,
-    /// The reads that the block cache answered.
+    /// The blocks that the block cache answered.
     pub block_hits: u64,
-    /// The block reads that went to disk.
+    /// The blocks loaded from disk into the block cache.
     pub block_misses: u64,
     /// The positional reads from disk.
     pub disk_reads: u64,
@@ -58,10 +59,11 @@ impl CachedLocalFileSystem {
     /// Returns the current counters.
     pub fn stats(&self) -> CacheStats {
         let (disk_reads, disk_bytes) = self.reader.disk_counters();
+        let (block_hits, block_misses) = self.reader.block_counters();
         CacheStats {
             opens: self.reader.handles.opens(),
-            block_hits: 0,
-            block_misses: 0,
+            block_hits,
+            block_misses,
             disk_reads,
             disk_bytes,
         }

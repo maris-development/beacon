@@ -14,6 +14,16 @@ use super::version::FileVersion;
 /// The store name in `object_store::Error::Generic`.
 pub(super) const STORE: &str = "LocalFileSystem";
 
+/// The maximum number of paths whose epoch the cache keeps.
+const MAX_EPOCH_PATHS: u64 = 65536;
+
+/// The source of handle epochs. Epochs are never reused.
+static NEXT_EPOCH: AtomicU64 = AtomicU64::new(1);
+
+fn fresh_epoch() -> u64 {
+    NEXT_EPOCH.fetch_add(1, Ordering::Relaxed)
+}
+
 /// A callback for a path whose cached handle became stale or was invalidated.
 pub(crate) type OnChange = Arc<dyn Fn(&Path) + Send + Sync>;
 
@@ -24,6 +34,8 @@ pub(crate) struct OpenFile {
     pub file: std::fs::File,
     /// The file version at open time.
     pub version: FileVersion,
+    /// The epoch of the path when the open started. Each invalidation of the path ends it.
+    pub epoch: u64,
     /// The last version check, in microseconds since the `HandleCache` start.
     checked_at: AtomicU64,
     /// Lets one revalidation of this handle run at a time.
@@ -78,10 +90,15 @@ fn map_io_error(path: &Path, e: io::Error) -> LoadError {
 /// A bounded cache of open file handles, keyed by filesystem path.
 pub(crate) struct HandleCache {
     cache: Cache<PathBuf, Arc<OpenFile>>,
+    /// The current epoch of each path.
+    epochs: moka::sync::Cache<PathBuf, u64>,
     revalidate_after: Duration,
     on_change: Option<OnChange>,
     opens: Arc<AtomicU64>,
     start: Instant,
+    /// Test seam: the next revalidation stat fails with a permission error.
+    #[cfg(test)]
+    fail_stat: std::sync::atomic::AtomicBool,
 }
 
 impl HandleCache {
@@ -93,10 +110,13 @@ impl HandleCache {
                 .max_capacity(opts.max_open_files)
                 .time_to_idle(opts.handle_idle)
                 .build(),
+            epochs: moka::sync::Cache::new(MAX_EPOCH_PATHS),
             revalidate_after: opts.revalidate_after,
             on_change,
             opens: Arc::new(AtomicU64::new(0)),
             start: Instant::now(),
+            #[cfg(test)]
+            fail_stat: Default::default(),
         }
     }
 
@@ -117,11 +137,21 @@ impl HandleCache {
             .await
     }
 
-    /// Drops the cached handle of `path` and runs `on_change`.
+    /// Gives `path` a new epoch, drops its cached handle and runs `on_change`.
     pub async fn invalidate(&self, path: &Path) {
+        // The new epoch comes first, so that no open after the drop takes the old one.
+        self.epochs.insert(path.to_path_buf(), fresh_epoch());
         self.cache.invalidate(path).await;
         if let Some(on_change) = &self.on_change {
             on_change(path);
+        }
+    }
+
+    /// Invalidates `path` unless its cached handle is another one than `file`.
+    pub async fn invalidate_if_current(&self, path: &Path, file: &Arc<OpenFile>) {
+        match self.cache.get(path).await {
+            Some(current) if !Arc::ptr_eq(&current, file) => {}
+            _ => self.invalidate(path).await,
         }
     }
 
@@ -174,6 +204,11 @@ impl HandleCache {
                 store: STORE,
                 source: Box::new(e),
             })?;
+        #[cfg(test)]
+        let stat = match self.fail_stat.swap(false, Ordering::Relaxed) {
+            true => Err(io::Error::new(io::ErrorKind::PermissionDenied, "injected")),
+            false => stat,
+        };
         match stat {
             Ok(m) if !m.is_dir() && FileVersion::from_metadata(&m) == file.version => {
                 file.checked_at.store(checked_at, Ordering::Release);
@@ -204,11 +239,15 @@ impl HandleCache {
         let owned = path.to_path_buf();
         let opens = self.opens.clone();
         let start = self.start;
+        let epochs = self.epochs.clone();
         self.cache
             .try_get_with_by_ref(path, async move {
-                let opened = tokio::task::spawn_blocking(move || open(&owned, &opens, start))
-                    .await
-                    .map_err(|e| LoadError::Io(Arc::new(io::Error::other(e))))?;
+                // Taken before the open: an invalidation during the open ends this epoch.
+                let epoch = epochs.get_with_by_ref(&owned, fresh_epoch);
+                let opened =
+                    tokio::task::spawn_blocking(move || open(&owned, epoch, &opens, start))
+                        .await
+                        .map_err(|e| LoadError::Io(Arc::new(io::Error::other(e))))?;
                 opened.map(Arc::new)
             })
             .await
@@ -217,7 +256,7 @@ impl HandleCache {
 }
 
 /// Opens the file at `path` and reads its version.
-fn open(path: &Path, opens: &AtomicU64, start: Instant) -> Result<OpenFile, LoadError> {
+fn open(path: &Path, epoch: u64, opens: &AtomicU64, start: Instant) -> Result<OpenFile, LoadError> {
     opens.fetch_add(1, Ordering::Relaxed);
     let file = std::fs::File::open(path).map_err(|e| map_io_error(path, e))?;
     let m = file.metadata().map_err(|e| map_io_error(path, e))?;
@@ -227,6 +266,7 @@ fn open(path: &Path, opens: &AtomicU64, start: Instant) -> Result<OpenFile, Load
     Ok(OpenFile {
         file,
         version: FileVersion::from_metadata(&m),
+        epoch,
         checked_at: AtomicU64::new(start.elapsed().as_micros() as u64),
         revalidating: tokio::sync::Mutex::new(()),
     })
@@ -386,6 +426,68 @@ mod tests {
         replace(&a, b"abcdef");
         cache.get_fresh(&a).await.unwrap();
         cache.invalidate(&b).await;
+        assert_eq!(*seen.lock(), vec![a.clone(), b.clone()]);
+        // An unchanged file does not run on_change.
+        cache.get_fresh(&a).await.unwrap();
+        cache.get_fresh(&b).await.unwrap();
         assert_eq!(*seen.lock(), vec![a, b]);
+    }
+
+    #[tokio::test]
+    async fn stat_error_drops_handle() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("a.bin");
+        std::fs::write(&p, b"abc").unwrap();
+        let seen = Arc::new(Mutex::new(0));
+        let record = seen.clone();
+        let on_change: OnChange = Arc::new(move |_| *record.lock() += 1);
+        let cache = HandleCache::new(&opts(Duration::from_secs(3600)), Some(on_change));
+        cache.get(&p).await.unwrap();
+        cache.fail_stat.store(true, Ordering::Relaxed);
+        let err = cache.get_fresh(&p).await.unwrap_err();
+        assert!(
+            matches!(err, object_store::Error::Generic { store: STORE, .. }),
+            "{err}"
+        );
+        assert!(!cache.cache.contains_key(&p));
+        assert_eq!(*seen.lock(), 1);
+        cache.get(&p).await.unwrap();
+        assert_eq!(cache.opens(), 2);
+    }
+
+    #[tokio::test]
+    async fn invalidation_gives_new_epoch() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.bin");
+        let b = dir.path().join("b.bin");
+        std::fs::write(&a, b"abc").unwrap();
+        std::fs::write(&b, b"abc").unwrap();
+        let cache = HandleCache::new(&opts(Duration::from_secs(3600)), None);
+        let first = cache.get(&a).await.unwrap();
+        assert_ne!(cache.get(&b).await.unwrap().epoch, first.epoch);
+        // An unchanged revalidation keeps the handle and the epoch.
+        assert_eq!(cache.get_fresh(&a).await.unwrap().epoch, first.epoch);
+        cache.invalidate(&a).await;
+        let second = cache.get(&a).await.unwrap();
+        assert!(second.epoch > first.epoch);
+        // An eviction is not an invalidation: the next open keeps the epoch.
+        cache.cache.invalidate(&a).await;
+        assert_eq!(cache.get(&a).await.unwrap().epoch, second.epoch);
+    }
+
+    #[tokio::test]
+    async fn invalidate_if_current_keeps_newer_handle() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("a.bin");
+        std::fs::write(&p, b"abc").unwrap();
+        let cache = HandleCache::new(&opts(Duration::from_secs(3600)), None);
+        let old = cache.get(&p).await.unwrap();
+        cache.invalidate(&p).await;
+        let new = cache.get(&p).await.unwrap();
+        cache.invalidate_if_current(&p, &old).await;
+        assert!(Arc::ptr_eq(&cache.get(&p).await.unwrap(), &new));
+        cache.invalidate_if_current(&p, &new).await;
+        assert!(!Arc::ptr_eq(&cache.get(&p).await.unwrap(), &new));
+        assert_eq!(cache.opens(), 3);
     }
 }

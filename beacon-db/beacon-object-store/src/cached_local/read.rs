@@ -15,7 +15,8 @@ use object_store::{
 };
 
 use super::CachedLocalOptions;
-use super::handles::{HandleCache, OpenFile, STORE};
+use super::blocks::BlockCache;
+use super::handles::{HandleCache, OnChange, OpenFile, STORE};
 
 /// Reads into `buf` at `offset` until `buf` is full or the file ends. Returns the bytes read.
 pub(crate) fn read_exact_at(file: &File, buf: &mut [u8], offset: u64) -> io::Result<usize> {
@@ -102,9 +103,15 @@ fn needs_fresh(range: Option<&GetRange>, size: u64) -> bool {
     }
 }
 
-/// The open handles and the read counters of the store.
+/// Turns a shared I/O error into an owned one with the same kind and message.
+fn unshare(e: Arc<io::Error>) -> io::Error {
+    Arc::try_unwrap(e).unwrap_or_else(|e| io::Error::new(e.kind(), e.to_string()))
+}
+
+/// The open handles, the block cache and the read counters of the store.
 pub(crate) struct Reader {
     pub handles: HandleCache,
+    blocks: Option<Arc<BlockCache>>,
     stream_chunk: u64,
     coalesce_gap: u64,
     disk_reads: AtomicU64,
@@ -116,9 +123,16 @@ pub(crate) struct Reader {
 
 impl Reader {
     pub fn new(opts: &CachedLocalOptions) -> Self {
+        let blocks = (opts.block_size > 0)
+            .then(|| Arc::new(BlockCache::new(opts.block_size, opts.block_cache_bytes)));
+        let on_change = blocks
+            .clone()
+            .map(|blocks| Arc::new(move |path: &Path| blocks.invalidate_path(path)) as OnChange);
         Self {
-            handles: HandleCache::new(opts, None),
-            stream_chunk: opts.stream_chunk,
+            handles: HandleCache::new(opts, on_change),
+            blocks,
+            // A piece of 0 bytes would never end the stream.
+            stream_chunk: opts.stream_chunk.max(1),
             coalesce_gap: opts.coalesce_gap,
             disk_reads: AtomicU64::new(0),
             disk_bytes: AtomicU64::new(0),
@@ -135,9 +149,19 @@ impl Reader {
         )
     }
 
-    /// Drops the handle of `path` and returns a new one.
-    async fn reopen(&self, path: &Path) -> object_store::Result<Arc<OpenFile>> {
-        self.handles.invalidate(path).await;
+    /// The block cache hits and misses, 0 when the block cache is off.
+    pub fn block_counters(&self) -> (u64, u64) {
+        self.blocks.as_ref().map_or((0, 0), |b| b.counters())
+    }
+
+    /// Drops `failed`, the handle of `path`, unless a newer one is cached, and returns a
+    /// checked handle.
+    async fn reopen(
+        &self,
+        path: &Path,
+        failed: &Arc<OpenFile>,
+    ) -> object_store::Result<Arc<OpenFile>> {
+        self.handles.invalidate_if_current(path, failed).await;
         self.handles.get_fresh(path).await
     }
 
@@ -176,7 +200,7 @@ impl Reader {
                     }
                     Err(ReadError::Stale(_)) if !restarted => {
                         restarted = true;
-                        file = self.reopen(&path).await?;
+                        file = self.reopen(&path, &file).await?;
                         continue;
                     }
                     Err(e) => return Err(e.into_store(&path)),
@@ -204,7 +228,7 @@ impl Reader {
         }
         match self.read_ranges(path, &file, ranges).await {
             Err(ReadError::Stale(_)) => {
-                let fresh = self.reopen(path).await?;
+                let fresh = self.reopen(path, &file).await?;
                 self.read_ranges(path, &fresh, ranges)
                     .await
                     .map_err(|e| e.into_store(path))
@@ -245,7 +269,7 @@ impl Reader {
                 let (bytes, file) = match reader.read(&path, &file, pos..next).await {
                     Ok(bytes) => (bytes, file),
                     Err(ReadError::Stale(e)) => {
-                        let fresh = reader.reopen(&path).await?;
+                        let fresh = reader.reopen(&path, &file).await?;
                         // The returned metadata describes this version only.
                         if fresh.version != file.version {
                             return Err(read_error(&path, e));
@@ -275,7 +299,16 @@ impl Reader {
             return Ok(Bytes::new());
         }
         check_eof(path, file.version.size, &range)?;
-        match self.read_at(file.clone(), range).await? {
+        let read = match &self.blocks {
+            Some(blocks) if range.end - range.start < blocks.block_size() => blocks
+                .read(&Arc::new(path.to_path_buf()), file, range, |r| {
+                    self.read_at(file.clone(), r)
+                })
+                .await
+                .map_err(unshare),
+            _ => self.read_at(file.clone(), range).await,
+        };
+        match read {
             Ok(bytes) => Ok(bytes),
             Err(e)
                 if matches!(
@@ -289,15 +322,11 @@ impl Reader {
         }
     }
 
-    /// One positional read of the whole `range` on a blocking thread.
-    async fn read_at(
-        &self,
-        file: Arc<OpenFile>,
-        range: Range<u64>,
-    ) -> object_store::Result<io::Result<Bytes>> {
+    /// One positional read of the whole `range` on a blocking thread. A short read fails.
+    async fn read_at(&self, file: Arc<OpenFile>, range: Range<u64>) -> io::Result<Bytes> {
         #[cfg(test)]
         if self.fail_reads.lock().pop_front() == Some(true) {
-            return Ok(Err(io::Error::new(io::ErrorKind::NotFound, "injected")));
+            return Err(io::Error::new(io::ErrorKind::NotFound, "injected"));
         }
         let len = (range.end - range.start) as usize;
         let read = tokio::task::spawn_blocking(move || {
@@ -307,19 +336,18 @@ impl Reader {
             Ok::<_, io::Error>(buf)
         })
         .await
-        .map_err(generic)?;
+        .map_err(io::Error::other)?;
         self.disk_reads.fetch_add(1, Ordering::Relaxed);
-        Ok(read.and_then(|buf| {
-            self.disk_bytes
-                .fetch_add(buf.len() as u64, Ordering::Relaxed);
-            if buf.len() < len {
-                return Err(io::Error::new(
-                    io::ErrorKind::UnexpectedEof,
-                    format!("expected {len} bytes, read {}", buf.len()),
-                ));
-            }
-            Ok(Bytes::from(buf))
-        }))
+        let buf = read?;
+        self.disk_bytes
+            .fetch_add(buf.len() as u64, Ordering::Relaxed);
+        if buf.len() < len {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                format!("expected {len} bytes, read {}", buf.len()),
+            ));
+        }
+        Ok(Bytes::from(buf))
     }
 }
 
@@ -432,6 +460,86 @@ mod tests {
     async fn stream_retries_later_piece_on_same_version() {
         let (_dir, p, reader) = setup(100, 300);
         fail(&reader, &[false, true]);
+        let bytes = get(&reader, &p, None).await.bytes().await.unwrap();
+        assert_eq!(&bytes[..], &[1u8; 300][..]);
+    }
+
+    /// A reader with 4 KiB blocks and a file of `len` ones.
+    fn setup_blocks(len: usize) -> (tempfile::TempDir, PathBuf, Arc<Reader>) {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("a.bin");
+        std::fs::write(&p, vec![1u8; len]).unwrap();
+        let opts = CachedLocalOptions {
+            revalidate_after: Duration::from_secs(3600),
+            block_size: 4096,
+            ..Default::default()
+        };
+        (dir, p, Arc::new(Reader::new(&opts)))
+    }
+
+    fn set_mtime(path: &Path, secs: u64) {
+        let f = std::fs::File::options().write(true).open(path).unwrap();
+        f.set_modified(std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(secs))
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn old_handle_blocks_never_reach_new_handle() {
+        let (_dir, p, reader) = setup_blocks(10_000);
+        set_mtime(&p, 1_000_000);
+        let old = reader.handles.get(&p).await.unwrap();
+        reader.handles.invalidate(&p).await;
+        // Same size and mtime: the new file has the same version.
+        replace(&p, 10_000);
+        set_mtime(&p, 1_000_000);
+        // The old handle still reads the old file and caches its block.
+        let bytes = reader.read(&p, &old, 0..100).await.ok().unwrap();
+        assert!(bytes.iter().all(|&x| x == 1));
+        let new = reader.handles.get(&p).await.unwrap();
+        assert_eq!(new.version, old.version);
+        assert_ne!(new.epoch, old.epoch);
+        let bytes = reader.read(&p, &new, 0..100).await.ok().unwrap();
+        assert!(bytes.iter().all(|&x| x == 2), "old block served");
+        assert_eq!(reader.block_counters(), (0, 2));
+    }
+
+    #[tokio::test]
+    async fn restart_with_blocks_reads_new_file() {
+        let (_dir, p, reader) = setup_blocks(10_000);
+        reader
+            .get_ranges(&p, std::slice::from_ref(&(0..10)))
+            .await
+            .unwrap();
+        replace(&p, 10_000);
+        fail(&reader, &[true]);
+        let got = reader
+            .get_ranges(&p, std::slice::from_ref(&(5000..5100)))
+            .await
+            .unwrap();
+        assert!(got[0].iter().all(|&x| x == 2), "old bytes");
+        // The restart dropped the old handle, so its cached block is out of reach.
+        let got = reader
+            .get_ranges(&p, std::slice::from_ref(&(0..10)))
+            .await
+            .unwrap();
+        assert!(got[0].iter().all(|&x| x == 2), "old block served");
+        assert_eq!(reader.handles.opens(), 2);
+    }
+
+    #[tokio::test]
+    async fn reopen_keeps_newer_handle() {
+        let (_dir, p, reader) = setup_blocks(10_000);
+        let old = reader.handles.get(&p).await.unwrap();
+        reader.handles.invalidate(&p).await;
+        let new = reader.handles.get(&p).await.unwrap();
+        let got = reader.reopen(&p, &old).await.unwrap();
+        assert!(Arc::ptr_eq(&got, &new));
+        assert_eq!(reader.handles.opens(), 2);
+    }
+
+    #[tokio::test]
+    async fn zero_stream_chunk_ends() {
+        let (_dir, p, reader) = setup(0, 300);
         let bytes = get(&reader, &p, None).await.bytes().await.unwrap();
         assert_eq!(&bytes[..], &[1u8; 300][..]);
     }
