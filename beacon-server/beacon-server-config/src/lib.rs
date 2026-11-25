@@ -18,8 +18,8 @@ pub use beacon_arrow_netcdf::datafusion::NetcdfConfig;
 pub use beacon_arrow_zarr::ZarrConfig;
 pub use beacon_common::CrawlerConfig;
 pub use beacon_common::FileStatsConfig;
-use beacon_datafusion_ext::type_widening::{strategy_by_name, DefaultArrowTypeWidening};
 pub use beacon_datafusion_ext::type_widening::{ArrowTypeWideningStrategy, TypeConflict};
+use beacon_datafusion_ext::type_widening::{DefaultArrowTypeWidening, strategy_by_name};
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -867,11 +867,19 @@ fn validate_datasets_cache(cache: &DatasetsCacheConfig) -> Result<()> {
         };
         ConfigError::InvalidDatasetsCache(message)
     })?;
-    if cache.block_size > 0 && cache.block_cache_bytes == 0 {
+    // A time to idle of 0 closes each handle at once.
+    if cache.handle_idle_secs == 0 {
         return Err(ConfigError::InvalidDatasetsCache(
-            "BEACON_DATASETS_CACHE_BLOCK_CACHE_SIZE must be at least 1 byte when the block cache is on"
-                .to_string(),
+            "BEACON_DATASETS_CACHE_HANDLE_IDLE_SECS must be at least 1".to_string(),
         ));
+    }
+    // A cache smaller than one block never keeps a block.
+    if cache.block_size > 0 && cache.block_cache_bytes < cache.block_size {
+        return Err(ConfigError::InvalidDatasetsCache(format!(
+            "BEACON_DATASETS_CACHE_BLOCK_CACHE_SIZE must be at least BEACON_DATASETS_CACHE_BLOCK_SIZE \
+             ({} bytes) when the block cache is on, got {} bytes",
+            cache.block_size, cache.block_cache_bytes
+        )));
     }
     Ok(())
 }
@@ -1464,18 +1472,38 @@ mod tests {
     }
 
     #[test]
-    fn datasets_cache_rejects_zero_cache_size() {
+    fn datasets_cache_rejects_cache_smaller_than_block() {
+        let cache_with = |size| {
+            config(&[
+                ("BEACON_DATASETS_CACHE_ENABLED", "true"),
+                ("BEACON_DATASETS_CACHE_BLOCK_SIZE", "1MiB"),
+                ("BEACON_DATASETS_CACHE_BLOCK_CACHE_SIZE", size),
+            ])
+            .datasets_cache
+        };
+        for size in ["0", "1048575"] {
+            let err = validate_datasets_cache(&cache_with(size))
+                .expect_err("a block cache needs room for one block")
+                .to_string();
+            assert!(
+                err.contains("BEACON_DATASETS_CACHE_BLOCK_CACHE_SIZE"),
+                "got: {err}"
+            );
+        }
+        validate_datasets_cache(&cache_with("1MiB")).expect("one block fits");
+    }
+
+    #[test]
+    fn datasets_cache_rejects_zero_handle_idle() {
         let cache = config(&[
             ("BEACON_DATASETS_CACHE_ENABLED", "true"),
-            ("BEACON_DATASETS_CACHE_BLOCK_SIZE", "1MiB"),
-            ("BEACON_DATASETS_CACHE_BLOCK_CACHE_SIZE", "0"),
+            ("BEACON_DATASETS_CACHE_HANDLE_IDLE_SECS", "0"),
         ])
         .datasets_cache;
-        let err = validate_datasets_cache(&cache)
-            .expect_err("a block cache needs capacity")
-            .to_string();
+        let err = validate_datasets_cache(&cache).expect_err("a handle needs an idle time");
         assert!(
-            err.contains("BEACON_DATASETS_CACHE_BLOCK_CACHE_SIZE"),
+            err.to_string()
+                .contains("BEACON_DATASETS_CACHE_HANDLE_IDLE_SECS"),
             "got: {err}"
         );
     }
