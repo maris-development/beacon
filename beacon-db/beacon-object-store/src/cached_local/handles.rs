@@ -269,6 +269,7 @@ impl HandleCache {
                 Ok(true)
             }
             Ok(m) if !m.is_dir() => {
+                tracing::debug!(path = %path.display(), "revalidation found a changed file");
                 self.invalidate(path).await;
                 Ok(false)
             }
@@ -333,6 +334,7 @@ fn open(
     if m.is_dir() {
         return Err(is_directory(path));
     }
+    tracing::debug!(path = %path.display(), size = m.len(), "opened file handle");
     Ok(OpenFile {
         file,
         version: FileVersion::from_metadata(&m),

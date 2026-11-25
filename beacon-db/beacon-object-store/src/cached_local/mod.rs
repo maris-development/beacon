@@ -9,7 +9,8 @@ mod version;
 use std::collections::VecDeque;
 use std::fmt;
 use std::ops::Range;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -51,6 +52,9 @@ impl CachedLocalFileSystem {
     /// Wraps `inner` with the given options.
     pub fn new(inner: LocalFileSystem, opts: CachedLocalOptions) -> Self {
         let reader = Arc::new(Reader::new(&opts));
+        if tokio::runtime::Handle::try_current().is_ok() {
+            spawn_stats_log(Arc::downgrade(&reader), STATS_LOG_INTERVAL);
+        }
         Self {
             inner,
             opts,
@@ -60,15 +64,7 @@ impl CachedLocalFileSystem {
 
     /// Returns the current counters.
     pub fn stats(&self) -> CacheStats {
-        let (disk_reads, disk_bytes) = self.reader.disk_counters();
-        let (block_hits, block_misses) = self.reader.block_counters();
-        CacheStats {
-            opens: self.reader.handles.opens(),
-            block_hits,
-            block_misses,
-            disk_reads,
-            disk_bytes,
-        }
+        stats_of(&self.reader)
     }
 
     fn evictor(&self) -> Evictor {
@@ -103,6 +99,47 @@ impl CachedLocalFileSystem {
     }
 }
 
+/// The time between two debug logs of the counters.
+const STATS_LOG_INTERVAL: Duration = Duration::from_secs(60);
+
+fn stats_of(reader: &Reader) -> CacheStats {
+    let (disk_reads, disk_bytes) = reader.disk_counters();
+    let (block_hits, block_misses) = reader.block_counters();
+    CacheStats {
+        opens: reader.handles.opens(),
+        block_hits,
+        block_misses,
+        disk_reads,
+        disk_bytes,
+    }
+}
+
+/// Logs the counters at debug level every `every` when they changed, until the store drops.
+fn spawn_stats_log(reader: Weak<Reader>, every: Duration) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut last = CacheStats::default();
+        let mut ticks = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
+        loop {
+            ticks.tick().await;
+            let Some(reader) = reader.upgrade() else {
+                return;
+            };
+            let stats = stats_of(&reader);
+            if stats != last {
+                tracing::debug!(
+                    opens = stats.opens,
+                    block_hits = stats.block_hits,
+                    block_misses = stats.block_misses,
+                    disk_reads = stats.disk_reads,
+                    disk_bytes = stats.disk_bytes,
+                    "cached local store counters"
+                );
+                last = stats;
+            }
+        }
+    })
+}
+
 /// True for an NFS silly-rename file, which a listing hides.
 fn is_nfs(location: &Path) -> bool {
     location
@@ -123,6 +160,7 @@ impl Evictor {
     async fn evict(&self, location: &Path) {
         // An invalid path has no cached handle; the inner store reports the error.
         if let Ok(path) = self.inner.path_to_filesystem(location) {
+            tracing::debug!(path = %path.display(), "write evicts cached file");
             self.reader.handles.invalidate(&path).await;
         }
     }
@@ -135,6 +173,7 @@ impl Evictor {
         if let Some(file) = self.reader.handles.peek(&path).await
             && (file.version.size != meta.size || file.version.last_modified != meta.last_modified)
         {
+            tracing::debug!(path = %path.display(), "listing shows a changed file");
             self.reader.handles.invalidate(&path).await;
         }
     }
@@ -313,6 +352,27 @@ mod tests {
     use object_store::ObjectStoreExt;
 
     use super::*;
+
+    #[tokio::test]
+    async fn stats_log_ends_with_the_store() {
+        let reader = Arc::new(Reader::new(&CachedLocalOptions::default()));
+        let task = spawn_stats_log(Arc::downgrade(&reader), Duration::from_millis(10));
+        drop(reader);
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("stats log task still runs")
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn new_spawns_no_task_without_runtime() {
+        let dir = tempfile::tempdir().unwrap();
+        let inner = LocalFileSystem::new_with_prefix(dir.path()).unwrap();
+        // A plain thread has no tokio runtime, so `new` must not spawn.
+        std::thread::spawn(move || CachedLocalFileSystem::new(inner, Default::default()))
+            .join()
+            .unwrap();
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn open_racing_put_is_not_kept() {
