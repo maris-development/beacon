@@ -12,9 +12,13 @@ datafusion = { workspace = true }
 # With the cloud clients: this crate builds the S3, GCS, Azure and HTTP stores.
 object_store = { workspace = true }
 async-trait = { workspace = true }
+bytes = { workspace = true }
+chrono = { workspace = true }
 futures = { workspace = true }
+moka = { workspace = true }
 parking_lot = { workspace = true }
 serde = { workspace = true }
+tokio = { workspace = true }
 tracing = { workspace = true }
 url = { workspace = true }
 

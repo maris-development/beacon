@@ -1814,8 +1814,11 @@ name = "beacon-object-store"
 version = "2.1.0-rc.3"
 dependencies = [
  "async-trait",
+ "bytes",
+ "chrono",
  "datafusion 54.1.0",
  "futures",
+ "moka",
  "object_store 0.13.2",
  "parking_lot",
  "serde",

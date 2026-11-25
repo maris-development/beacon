@@ -6,9 +6,11 @@
 //! - [`registry`]: the registry that builds a remote store at the first lookup.
 //! - [`secrets`]: the credentials of `CREATE SECRET`, by URL scope.
 //! - [`big_page_list`]: a store wrapper that lists a prefix in parallel pages.
+//! - [`cached_local`]: a local store that keeps file handles open and caches blocks.
 //! - [`location`]: the rule that maps a `LOCATION` text to a store and a path.
 
 pub mod big_page_list;
+pub mod cached_local;
 pub mod location;
 pub mod registry;
 pub mod secrets;
