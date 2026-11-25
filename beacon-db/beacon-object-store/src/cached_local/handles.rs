@@ -1,9 +1,10 @@
 //! The cache of open file handles.
 
+use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
 use moka::future::Cache;
@@ -90,6 +91,8 @@ const GENERATION_SLOTS: usize = 4096;
 /// A bounded cache of open file handles, keyed by filesystem path.
 pub(crate) struct HandleCache {
     cache: Cache<PathBuf, Arc<OpenFile>>,
+    /// The handles by path, for a lookup that does not count as a use of the cache.
+    known: Arc<parking_lot::Mutex<HashMap<PathBuf, Weak<OpenFile>>>>,
     /// Invalidation counters, one per path hash slot. A handle opened before the last
     /// invalidation of its slot is never returned.
     generations: Arc<[AtomicU64]>,
@@ -122,6 +125,7 @@ impl HandleCache {
                 .max_capacity(opts.max_open_files)
                 .time_to_idle(opts.handle_idle)
                 .build(),
+            known: Default::default(),
             generations: (0..GENERATION_SLOTS).map(|_| AtomicU64::new(0)).collect(),
             hasher: Default::default(),
             revalidate_after: opts.revalidate_after,
@@ -154,15 +158,19 @@ impl HandleCache {
             .await
     }
 
-    /// Returns the cached handle of `path`, with no open and no version check.
-    pub async fn peek(&self, path: &Path) -> Option<Arc<OpenFile>> {
-        self.cache.get(path).await
+    /// Returns the open handle of `path`, with no open and no version check.
+    ///
+    /// The lookup is not a use of the cache, so it does not restart the idle time. The
+    /// handle can be one that the cache dropped while a reader still holds it.
+    pub fn peek(&self, path: &Path) -> Option<Arc<OpenFile>> {
+        self.known.lock().get(path).and_then(Weak::upgrade)
     }
 
     /// Drops the cached handle of `path`, also one that an open in progress inserts later.
     /// Runs `on_change` when a cached handle was removed.
     pub async fn invalidate(&self, path: &Path) {
         self.generations[self.slot(path)].fetch_add(1, Ordering::SeqCst);
+        self.known.lock().remove(path);
         if self.cache.remove(path).await.is_some() {
             #[cfg(test)]
             self.changes.fetch_add(1, Ordering::Relaxed);
@@ -175,6 +183,7 @@ impl HandleCache {
     /// Closes the handles that are idle or past the capacity.
     pub async fn run_pending_tasks(&self) {
         self.cache.run_pending_tasks().await;
+        self.known.lock().retain(|_, file| file.strong_count() > 0);
     }
 
     /// The number of cached handles.
@@ -310,6 +319,8 @@ impl HandleCache {
     /// Returns the cached handle, or opens the file once for all concurrent callers.
     async fn load(&self, path: &Path) -> Result<Arc<OpenFile>, object_store::Error> {
         let owned = path.to_path_buf();
+        let key = owned.clone();
+        let known = self.known.clone();
         let opens = self.opens.clone();
         let start = self.start;
         let slot = self.slot(path);
@@ -331,7 +342,9 @@ impl HandleCache {
                 })
                 .await
                 .map_err(|e| LoadError::Io(Arc::new(io::Error::other(e))))?;
-                opened.map(Arc::new)
+                let file = Arc::new(opened?);
+                known.lock().insert(key, Arc::downgrade(&file));
+                Ok(file)
             })
             .await
             .map_err(|e: Arc<LoadError>| (*e).clone().into())

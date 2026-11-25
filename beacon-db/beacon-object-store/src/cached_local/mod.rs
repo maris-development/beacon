@@ -195,7 +195,7 @@ impl Evictor {
         let Ok(path) = self.inner.path_to_filesystem(&meta.location) else {
             return;
         };
-        if let Some(file) = self.reader.handles.peek(&path).await
+        if let Some(file) = self.reader.handles.peek(&path)
             && (file.version.size != meta.size || file.version.last_modified != meta.last_modified)
         {
             tracing::debug!(path = %path.display(), "listing shows a changed file");
@@ -417,13 +417,59 @@ mod tests {
         let inner = LocalFileSystem::new_with_prefix(dir.path()).unwrap();
         let store = CachedLocalFileSystem::new(inner, opts);
         store.get_range(&Path::from("a.bin"), 0..10).await.unwrap();
-        let handle = Arc::downgrade(&store.reader.handles.peek(&p).await.unwrap());
+        let handle = Arc::downgrade(&store.reader.handles.peek(&p).unwrap());
         assert!(handle.upgrade().is_some());
-        // The handle expires after 100 ms; the maintenance task runs after 1 s.
-        tokio::time::sleep(Duration::from_millis(1500)).await;
-        assert_eq!(store.reader.handles.entry_count(), 0);
-        assert!(handle.upgrade().is_none(), "the file is still open");
+        // The handle expires after 100 ms; the maintenance task runs every 1 s.
+        assert!(
+            closes_within(&store, &handle, Duration::from_secs(10)).await,
+            "the file is still open"
+        );
         std::fs::remove_file(&p).unwrap();
+    }
+
+    /// Waits until `handle` is closed and the cache holds no handle, or `limit` passes.
+    async fn closes_within(
+        store: &CachedLocalFileSystem,
+        handle: &Weak<handles::OpenFile>,
+        limit: Duration,
+    ) -> bool {
+        let deadline = tokio::time::Instant::now() + limit;
+        while tokio::time::Instant::now() < deadline {
+            if handle.upgrade().is_none() && store.reader.handles.entry_count() == 0 {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        false
+    }
+
+    #[tokio::test]
+    async fn listing_does_not_keep_idle_handle_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("a.bin");
+        std::fs::write(&p, vec![1u8; 1000]).unwrap();
+        let opts = CachedLocalOptions {
+            handle_idle: Duration::from_millis(300),
+            ..Default::default()
+        };
+        let inner = LocalFileSystem::new_with_prefix(dir.path()).unwrap();
+        let store = Arc::new(CachedLocalFileSystem::new(inner, opts));
+        store.get_range(&Path::from("a.bin"), 0..10).await.unwrap();
+        let handle = Arc::downgrade(&store.reader.handles.peek(&p).unwrap());
+        // A listing every 100 ms, faster than the idle time.
+        let lister = {
+            let store = store.clone();
+            tokio::spawn(async move {
+                loop {
+                    let listed: Vec<_> = store.list(None).try_collect().await.unwrap();
+                    assert_eq!(listed.len(), 1);
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            })
+        };
+        let closed = closes_within(&store, &handle, Duration::from_secs(10)).await;
+        lister.abort();
+        assert!(closed, "the listing keeps the file open");
     }
 
     #[tokio::test]
