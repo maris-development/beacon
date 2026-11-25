@@ -174,6 +174,28 @@ Beacon creates and uses these paths under `BEACON_DATA_DIR`:
 With Docker, mount the subdirectories that you want to keep. Two examples are
 `-v ./datasets:/beacon/data/datasets` and `-v ./tables:/beacon/data/tables`.
 
+### Datasets store cache
+
+The datasets store cache keeps file handles open and can keep data blocks in memory. It makes
+reads from NFS and from slow disks faster. See
+[Datasets on NFS or slow disks](performance-tuning.md#datasets-on-nfs-or-slow-disks).
+
+The settings apply to a local datasets store only. Beacon ignores them for an S3 datasets store
+(`BEACON_S3_DATASETS=true`). While `BEACON_DATASETS_CACHE_ENABLED` is `false`, the other five
+settings have no effect.
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `BEACON_DATASETS_CACHE_ENABLED` | `false` | Turn the cache on for the local datasets store. Ignored for an S3 datasets store. |
+| `BEACON_DATASETS_CACHE_MAX_OPEN_FILES` | `256` | Maximum number of open file handles in the cache. The value must be `1` or more. |
+| `BEACON_DATASETS_CACHE_HANDLE_IDLE_SECS` | `30` | Beacon closes a handle after this number of seconds without a read. |
+| `BEACON_DATASETS_CACHE_REVALIDATE_MS` | `1000` | After this number of milliseconds, Beacon compares a cached file with the file on disk again. |
+| `BEACON_DATASETS_CACHE_BLOCK_SIZE` | `0` | Block size of the block cache, in bytes. `0` turns the block cache off. Another value must be a power of two from `4096` to `16777216`. |
+| `BEACON_DATASETS_CACHE_BLOCK_CACHE_BYTES` | `268435456` | Memory limit of the block cache, in bytes. The default is 256 MiB. |
+
+When the cache is on, a value outside these limits stops the server at startup. The error message
+names the variable.
+
 ## Log files
 
 By default, Beacon writes each log line to two places at the same time:
