@@ -112,12 +112,15 @@ queries:
 | Storage behind the datasets folder | `BEACON_DATASETS_CACHE_BLOCK_SIZE` |
 | --- | --- |
 | Local SSD or NVMe | `0` (off) |
-| NFS on SSD, 1 Gbit | `0`, or `65536` for a collection of small files |
-| NFS on SSD, 10 Gbit | `262144` |
-| HDD, local or NFS | `1048576` |
-| High latency (WAN, cloud NFS) | `524288` to `1048576` |
+| NFS on SSD, 1 Gbit | `0`, or `64KiB` for a collection of small files |
+| NFS on SSD, 10 Gbit | `256KiB` |
+| HDD, local or NFS | `1MiB` |
+| High latency (WAN, cloud NFS) | `512KiB` to `1MiB` |
 
-`BEACON_DATASETS_CACHE_BLOCK_CACHE_BYTES` sets the memory limit of the block cache. Add this value
+Use binary units such as `KiB` and `MiB`. `MB` means 1000000 bytes, and this value is not a
+power of two.
+
+`BEACON_DATASETS_CACHE_BLOCK_CACHE_SIZE` sets the memory limit of the block cache. Add this value
 to the memory that you give to Beacon.
 
 ### When Beacon sees a changed file

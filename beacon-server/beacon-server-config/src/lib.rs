@@ -3,6 +3,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use beacon_object_store::cached_local::CachedLocalOptions;
+use bytesize::ByteSize;
 use envconfig::Envconfig;
 
 pub mod error;
@@ -500,12 +501,9 @@ struct RawConfig {
     #[envconfig(from = "BEACON_DATASETS_CACHE_REVALIDATE_MS", default = "1000")]
     datasets_cache_revalidate_ms: u64,
     #[envconfig(from = "BEACON_DATASETS_CACHE_BLOCK_SIZE", default = "0")]
-    datasets_cache_block_size: u64,
-    #[envconfig(
-        from = "BEACON_DATASETS_CACHE_BLOCK_CACHE_BYTES",
-        default = "268435456"
-    )]
-    datasets_cache_block_cache_bytes: u64,
+    datasets_cache_block_size: ByteSize,
+    #[envconfig(from = "BEACON_DATASETS_CACHE_BLOCK_CACHE_SIZE", default = "256MiB")]
+    datasets_cache_block_cache_size: ByteSize,
 
     // Maximum size, in bytes, accepted for a single dataset upload through the
     // admin API. `0` disables the cap. Default ~5 GiB.
@@ -815,8 +813,8 @@ impl From<RawConfig> for Config {
                 max_open_files: raw.datasets_cache_max_open_files,
                 handle_idle_secs: raw.datasets_cache_handle_idle_secs,
                 revalidate_ms: raw.datasets_cache_revalidate_ms,
-                block_size: raw.datasets_cache_block_size,
-                block_cache_bytes: raw.datasets_cache_block_cache_bytes,
+                block_size: raw.datasets_cache_block_size.as_u64(),
+                block_cache_bytes: raw.datasets_cache_block_cache_size.as_u64(),
             },
             // Decoded and validated in `Config::load` (see `secrets_key`).
             secrets: SecretsConfig { master_key: None },
@@ -859,8 +857,23 @@ fn validate_datasets_cache(cache: &DatasetsCacheConfig) -> Result<()> {
                 .map(|rest| format!("{var}{rest}"))
         })
         .unwrap_or(message);
+        // A decimal unit such as 1MB gives a size that is no power of two.
+        let message = if message.starts_with("BEACON_DATASETS_CACHE_BLOCK_SIZE")
+            && !cache.block_size.is_power_of_two()
+        {
+            format!("{message}; use binary units such as 64KiB or 1MiB; 1MB is 1000000 bytes")
+        } else {
+            message
+        };
         ConfigError::InvalidDatasetsCache(message)
-    })
+    })?;
+    if cache.block_size > 0 && cache.block_cache_bytes == 0 {
+        return Err(ConfigError::InvalidDatasetsCache(
+            "BEACON_DATASETS_CACHE_BLOCK_CACHE_SIZE must be at least 1 byte when the block cache is on"
+                .to_string(),
+        ));
+    }
+    Ok(())
 }
 
 /// Parses `BEACON_PLUGINS`: a comma list of `name=source`.
@@ -1375,7 +1388,7 @@ mod tests {
             ("BEACON_DATASETS_CACHE_HANDLE_IDLE_SECS", "5"),
             ("BEACON_DATASETS_CACHE_REVALIDATE_MS", "250"),
             ("BEACON_DATASETS_CACHE_BLOCK_SIZE", "65536"),
-            ("BEACON_DATASETS_CACHE_BLOCK_CACHE_BYTES", "1048576"),
+            ("BEACON_DATASETS_CACHE_BLOCK_CACHE_SIZE", "1048576"),
         ])
         .datasets_cache;
         assert!(cache.enabled);
@@ -1403,6 +1416,66 @@ mod tests {
         let err = validate_datasets_cache(&cache).expect_err("1000 is no power of two");
         assert!(
             err.to_string().contains("BEACON_DATASETS_CACHE_BLOCK_SIZE"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn datasets_cache_sizes_accept_units() {
+        let block_size = |value| {
+            config(&[("BEACON_DATASETS_CACHE_BLOCK_SIZE", value)])
+                .datasets_cache
+                .block_size
+        };
+        assert_eq!(block_size("1MiB"), 1_048_576);
+        assert_eq!(block_size("1048576"), 1_048_576);
+        assert_eq!(block_size("1 MiB"), 1_048_576);
+        assert_eq!(block_size("64kib"), 65_536);
+        let cache = config(&[("BEACON_DATASETS_CACHE_BLOCK_CACHE_SIZE", "512MiB")]).datasets_cache;
+        assert_eq!(cache.block_cache_bytes, 536_870_912);
+    }
+
+    #[test]
+    fn datasets_cache_rejects_decimal_block_size() {
+        let cache = config(&[
+            ("BEACON_DATASETS_CACHE_ENABLED", "true"),
+            ("BEACON_DATASETS_CACHE_BLOCK_SIZE", "1MB"),
+        ])
+        .datasets_cache;
+        let err = validate_datasets_cache(&cache)
+            .expect_err("1MB is no power of two")
+            .to_string();
+        assert!(
+            err.contains("BEACON_DATASETS_CACHE_BLOCK_SIZE"),
+            "got: {err}"
+        );
+        assert!(err.contains("MiB"), "got: {err}");
+    }
+
+    #[test]
+    fn datasets_cache_rejects_unparsable_size() {
+        let err = raw(&[("BEACON_DATASETS_CACHE_BLOCK_SIZE", "lots")])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("BEACON_DATASETS_CACHE_BLOCK_SIZE"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn datasets_cache_rejects_zero_cache_size() {
+        let cache = config(&[
+            ("BEACON_DATASETS_CACHE_ENABLED", "true"),
+            ("BEACON_DATASETS_CACHE_BLOCK_SIZE", "1MiB"),
+            ("BEACON_DATASETS_CACHE_BLOCK_CACHE_SIZE", "0"),
+        ])
+        .datasets_cache;
+        let err = validate_datasets_cache(&cache)
+            .expect_err("a block cache needs capacity")
+            .to_string();
+        assert!(
+            err.contains("BEACON_DATASETS_CACHE_BLOCK_CACHE_SIZE"),
             "got: {err}"
         );
     }

@@ -190,8 +190,12 @@ settings have no effect.
 | `BEACON_DATASETS_CACHE_MAX_OPEN_FILES` | `256` | Maximum number of open file handles in the cache. The value must be `1` or more. |
 | `BEACON_DATASETS_CACHE_HANDLE_IDLE_SECS` | `30` | Beacon closes a handle after this number of seconds without a read. |
 | `BEACON_DATASETS_CACHE_REVALIDATE_MS` | `1000` | After this number of milliseconds, Beacon compares a cached file with the file on disk again. |
-| `BEACON_DATASETS_CACHE_BLOCK_SIZE` | `0` | Block size of the block cache, in bytes. `0` turns the block cache off. Another value must be a power of two from `4096` to `16777216`. |
-| `BEACON_DATASETS_CACHE_BLOCK_CACHE_BYTES` | `268435456` | Memory limit of the block cache, in bytes. The default is 256 MiB. |
+| `BEACON_DATASETS_CACHE_BLOCK_SIZE` | `0` | Block size of the block cache. `0` turns the block cache off. Another value must be a power of two from `4KiB` to `16MiB`. |
+| `BEACON_DATASETS_CACHE_BLOCK_CACHE_SIZE` | `256MiB` | Memory limit of the block cache. When the block cache is on, the value must be `1` or more. |
+
+The two size values accept a number of bytes, or a number with a unit such as `KiB` or `MiB`.
+`MB` means 1000000 bytes, and `MiB` means 1048576 bytes. Upper case and lower case are equal, and
+a space before the unit is permitted. Examples are `1048576`, `1MiB` and `1 MiB`.
 
 When the cache is on, a value outside these limits stops the server at startup. The error message
 names the variable.

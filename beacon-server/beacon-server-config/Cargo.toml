@@ -9,6 +9,7 @@ rust-version.workspace = true
 license = "AGPL-3.0-only"
 [dependencies]
 envconfig = {workspace = true}
+bytesize = { workspace = true }
 object_store = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
