@@ -157,6 +157,11 @@ Each cached handle holds one open file descriptor. Keep `BEACON_DATASETS_CACHE_M
 below the file limit of the process (`ulimit -n`). Beacon also needs file descriptors for network
 connections, logs and the tables store.
 
+`BEACON_DATASETS_CACHE_MAX_OPEN_FILES` is a target, not a hard limit. The cache can hold more
+handles for a short time. It closes the extra handles at its next maintenance run, after 5 seconds
+at most. A file that a query still reads also stays open after the cache drops its handle. Keep a
+margin for these handles.
+
 With the block cache on, a low `BEACON_DATASETS_CACHE_MAX_OPEN_FILES` also lowers the block cache
 hits. See [Block size](#block-size).
 

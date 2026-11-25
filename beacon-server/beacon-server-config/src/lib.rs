@@ -360,7 +360,7 @@ pub struct DatasetsCacheConfig {
     /// Whether the local datasets store uses the cache. When false every other
     /// field here is inert.
     pub enabled: bool,
-    /// The maximum number of open file handles.
+    /// The target number of open file handles. The cache can hold more for a short time.
     pub max_open_files: u64,
     /// The seconds an unused file handle stays open.
     pub handle_idle_secs: u64,

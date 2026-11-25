@@ -187,7 +187,7 @@ The settings apply to a local datasets store only. Beacon ignores them for an S3
 | Variable | Default | Description |
 | --- | --- | --- |
 | `BEACON_DATASETS_CACHE_ENABLED` | `false` | Turn the cache on for the local datasets store. Ignored for an S3 datasets store. |
-| `BEACON_DATASETS_CACHE_MAX_OPEN_FILES` | `256` | Maximum number of open file handles in the cache. The value must be `1` or more. |
+| `BEACON_DATASETS_CACHE_MAX_OPEN_FILES` | `256` | Target number of open file handles in the cache. The cache can hold more for a short time. The value must be `1` or more. |
 | `BEACON_DATASETS_CACHE_HANDLE_IDLE_SECS` | `30` | Beacon closes a handle after this number of seconds without a read. The value must be `1` or more. |
 | `BEACON_DATASETS_CACHE_REVALIDATE_MS` | `1000` | After this number of milliseconds, Beacon compares a cached file with the file on disk again. |
 | `BEACON_DATASETS_CACHE_BLOCK_SIZE` | `0` | Block size of the block cache. `0` turns the block cache off. Another value must be a power of two from `4KiB` to `16MiB`. |
