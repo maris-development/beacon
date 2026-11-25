@@ -29,12 +29,18 @@ use datafusion::physical_expr::expressions::{
 };
 use datafusion::physical_expr::{ScalarFunctionExpr, conjunction, split_conjunction};
 use datafusion::physical_optimizer::PhysicalOptimizerRule;
-use datafusion::physical_plan::ExecutionPlan;
+use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use datafusion::physical_plan::filter::FilterExec;
+use datafusion::physical_plan::limit::{GlobalLimitExec, LocalLimitExec};
 use datafusion::physical_plan::projection::ProjectionExec;
+use datafusion::physical_plan::union::UnionExec;
+use datafusion::physical_plan::{ExecutionPlan, ExecutionPlanProperties};
 use datafusion::logical_expr::Volatility;
 
-use crate::exec::{NdBroadcastExec, NdFilterExec, NdProjectionExec};
+use crate::exec::{
+    NdBroadcastExec, NdCoalescePartitionsExec, NdFilterExec, NdLimitExec, NdProjectionExec,
+    NdUnionExec,
+};
 
 /// Sinks element-wise `ProjectionExec`s below an [`NdBroadcastExec`] into an
 /// [`NdProjectionExec`], so they evaluate before broadcasting.
@@ -182,6 +188,124 @@ impl PhysicalOptimizerRule for NdFilterPushdown {
 
     fn name(&self) -> &str {
         "NdFilterPushdown"
+    }
+
+    fn schema_check(&self) -> bool {
+        true
+    }
+}
+
+/// Sinks limits, unions and partition merges below an [`NdBroadcastExec`], so
+/// they run on nd batches and the broadcast builds only the rows that stay.
+///
+/// ```text
+/// LocalLimitExec[fetch]              NdBroadcastExec
+///   NdBroadcastExec           ->       NdLimitExec[fetch]
+///     nd-child                           nd-child
+///
+/// CoalescePartitionsExec[fetch]      NdBroadcastExec
+///   NdBroadcastExec           ->       NdLimitExec[fetch]
+///     nd-child                           NdCoalescePartitionsExec
+///                                          nd-child
+///
+/// UnionExec                          NdBroadcastExec
+///   NdBroadcastExec           ->       NdUnionExec
+///     nd-child-a                         nd-child-a
+///   NdBroadcastExec                      nd-child-b
+///     nd-child-b
+/// ```
+///
+/// A `GlobalLimitExec` sinks only over one partition, because it counts over
+/// all rows. A limit with a required order stays above the broadcast. A union
+/// sinks only when each input has exactly the schema of the union. A
+/// `CoalescePartitionsExec` sinks only with a fetch: the nd merge reads all
+/// partitions on one task, which is correct for a small cut and slow for a
+/// full result.
+///
+/// The rule runs bottom up: after a node sinks, its parent sees the new
+/// broadcast next.
+#[derive(Debug, Default)]
+pub struct NdStructuralPushdown;
+
+impl NdStructuralPushdown {
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// The nd form of `node`, when `node` can run below the broadcast.
+    fn sink(node: &Arc<dyn ExecutionPlan>) -> Result<Option<Arc<dyn ExecutionPlan>>> {
+        if let Some(limit) = node.downcast_ref::<LocalLimitExec>() {
+            let Some(child) = nd_child(limit.input()) else {
+                return Ok(None);
+            };
+            if limit.required_ordering().is_some() {
+                return Ok(None);
+            }
+            let nd = NdLimitExec::try_new(child, 0, Some(limit.fetch()))?;
+            return Ok(Some(Arc::new(nd)));
+        }
+        if let Some(limit) = node.downcast_ref::<GlobalLimitExec>() {
+            let Some(child) = nd_child(limit.input()) else {
+                return Ok(None);
+            };
+            if limit.required_ordering().is_some()
+                || child.output_partitioning().partition_count() != 1
+            {
+                return Ok(None);
+            }
+            let nd = NdLimitExec::try_new(child, limit.skip(), limit.fetch())?;
+            return Ok(Some(Arc::new(nd)));
+        }
+        if let Some(coalesce) = node.downcast_ref::<CoalescePartitionsExec>() {
+            let Some(child) = nd_child(coalesce.input()) else {
+                return Ok(None);
+            };
+            // Without a fetch, the flat merge keeps one broadcast task per partition.
+            let Some(fetch) = ExecutionPlan::fetch(coalesce) else {
+                return Ok(None);
+            };
+            let merged = Arc::new(NdCoalescePartitionsExec::try_new(child)?);
+            let nd = NdLimitExec::try_new(merged, 0, Some(fetch))?;
+            return Ok(Some(Arc::new(nd)));
+        }
+        if let Some(union) = node.downcast_ref::<UnionExec>() {
+            let schema = union.schema();
+            let mut children = Vec::with_capacity(union.inputs().len());
+            for input in union.inputs() {
+                match nd_child(input) {
+                    Some(child) if child.schema() == schema => children.push(child),
+                    _ => return Ok(None),
+                }
+            }
+            return Ok(Some(Arc::new(NdUnionExec::try_new(children)?)));
+        }
+        Ok(None)
+    }
+}
+
+/// The nd child of `plan`, when `plan` is an [`NdBroadcastExec`].
+fn nd_child(plan: &Arc<dyn ExecutionPlan>) -> Option<Arc<dyn ExecutionPlan>> {
+    plan.downcast_ref::<NdBroadcastExec>()
+        .map(|broadcast| broadcast.input().clone())
+}
+
+impl PhysicalOptimizerRule for NdStructuralPushdown {
+    fn optimize(
+        &self,
+        plan: Arc<dyn ExecutionPlan>,
+        _config: &ConfigOptions,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        plan.transform_up(|node| match Self::sink(&node)? {
+            Some(nd) => Ok(Transformed::yes(
+                Arc::new(NdBroadcastExec::try_new(nd)?) as Arc<dyn ExecutionPlan>
+            )),
+            None => Ok(Transformed::no(node)),
+        })
+        .map(|t| t.data)
+    }
+
+    fn name(&self) -> &str {
+        "NdStructuralPushdown"
     }
 
     fn schema_check(&self) -> bool {

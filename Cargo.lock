@@ -1785,6 +1785,7 @@ name = "beacon-nd-execution"
 version = "2.1.0-rc.3"
 dependencies = [
  "arrow",
+ "async-trait",
  "beacon-nd-encoding",
  "datafusion 54.1.0",
  "futures",

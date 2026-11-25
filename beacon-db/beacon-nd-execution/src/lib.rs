@@ -16,6 +16,10 @@
 //!   into flat `RecordBatch`es.
 //! - [`NdProjectionPushdown`] and [`NdFilterPushdown`]: sink projections and
 //!   filters below the broadcast.
+//! - [`exec::NdLimitExec`], [`exec::NdUnionExec`] and
+//!   [`exec::NdCoalescePartitionsExec`]: cut, list and merge nd streams.
+//! - [`NdStructuralPushdown`]: sinks limits, unions and partition merges below
+//!   the broadcast.
 
 pub mod broadcast;
 pub mod exec;
@@ -24,7 +28,9 @@ pub mod optimizer;
 
 pub use broadcast::BroadcastMap;
 pub use materialize::{NdArrowArrayExt, NdRecordBatchExt};
-pub use optimizer::{NdFilterPushdown, NdProjectionPushdown, is_pushable_expr};
+pub use optimizer::{
+    NdFilterPushdown, NdProjectionPushdown, NdStructuralPushdown, is_pushable_expr,
+};
 
 #[cfg(test)]
 mod tests;

@@ -13,4 +13,5 @@ futures = { workspace = true }
 beacon-nd-encoding = { path = "../beacon-nd-encoding" }
 
 [dev-dependencies]
+async-trait = { workspace = true }
 tokio = { workspace = true }
