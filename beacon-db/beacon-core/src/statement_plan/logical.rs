@@ -1198,6 +1198,39 @@ impl UserDefinedLogicalNodeCore for ReplaceTableContentsNode {
     }
 }
 
+/// Logical node for `INSERT INTO <table> BY NAME <query>`. `input` is the
+/// planned query. The column mapping is made at physical planning, from the
+/// table schema of that moment. Produces the inserted-row count.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Hash)]
+pub(crate) struct InsertByNameNode {
+    pub(crate) table: TableReference,
+    pub(crate) input: LogicalPlan,
+}
+
+impl UserDefinedLogicalNodeCore for InsertByNameNode {
+    fn name(&self) -> &str {
+        "InsertByName"
+    }
+    fn inputs(&self) -> Vec<&LogicalPlan> {
+        vec![&self.input]
+    }
+    fn schema(&self) -> &DFSchemaRef {
+        count_df_schema()
+    }
+    fn expressions(&self) -> Vec<Expr> {
+        vec![]
+    }
+    fn fmt_for_explain(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "InsertByName: table={}", self.table)
+    }
+    fn with_exprs_and_inputs(&self, _exprs: Vec<Expr>, mut inputs: Vec<LogicalPlan>) -> Result<Self> {
+        Ok(Self {
+            table: self.table.clone(),
+            input: inputs.swap_remove(0),
+        })
+    }
+}
+
 /// Logical node for `ALTER TABLE <name> <operations>`. DataFusion cannot plan
 /// `ALTER TABLE`, so it is lowered straight from the parsed AST.
 #[derive(Debug, PartialEq, Eq, PartialOrd, Hash)]

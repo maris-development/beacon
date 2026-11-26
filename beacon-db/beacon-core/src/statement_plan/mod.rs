@@ -15,6 +15,7 @@ mod actions;
 pub(crate) mod crawler;
 mod definition;
 pub(crate) mod functions;
+mod insert_by_name;
 mod logical;
 mod lower;
 pub(crate) mod materialized_view;
@@ -28,8 +29,8 @@ use std::sync::{Arc, OnceLock, Weak};
 
 use datafusion::{
     common::tree_node::{TreeNode, TreeNodeRecursion},
-    execution::SendableRecordBatchStream,
-    logical_expr::{Extension, LogicalPlan},
+    execution::{context::SessionState, SendableRecordBatchStream},
+    logical_expr::{Extension, LogicalPlan, LogicalPlanBuilder},
     prelude::{SQLOptions, SessionContext},
 };
 
@@ -38,7 +39,7 @@ use beacon_sql_parser::statement::{
     CreateMaterializedViewStatement, CreateSecretStatement, DetachStatement, DropCrawlerStatement,
     DropIndexStatement, DropSecretStatement, RefreshStatement,
     AnalyzeFilesStatement, RunCrawlerStatement, ShowIndexesStatement,
-    SummarizeStatement, InstallStatement, UninstallStatement,
+    SummarizeStatement, InstallStatement, UninstallStatement, InsertByNameStatement,
 };
 
 pub use plan_facts::{FileLocation, PlanFacts, PlanRead, TableFacts};
@@ -102,6 +103,7 @@ pub(crate) fn plan_produces_result_set(plan: &LogicalPlan) -> bool {
         // CTAS reports a row count like DML, so it stays DDL here.
         LogicalPlan::Extension(ext) => {
             !ext.node.as_any().is::<logical::CreateManagedTableNode>()
+                && !ext.node.as_any().is::<logical::InsertByNameNode>()
                 && !ext.node.schema().fields().is_empty()
         }
         // Everything else is a row-producing query (`SELECT`, `VALUES`, ...).
@@ -530,6 +532,34 @@ pub(crate) fn show_indexes_plan(statement: ShowIndexesStatement) -> LogicalPlan 
             table: object_name_value(&statement.table),
         }),
     })
+}
+
+/// Build the logical plan for `[EXPLAIN] INSERT INTO <table> BY NAME <query>`.
+///
+/// The query is planned with the session's SQL planner and becomes the input
+/// of an [`logical::InsertByNameNode`]. `EXPLAIN` wraps the node in a
+/// DataFusion explain plan, which plans the node but does not run it.
+pub(crate) async fn insert_by_name_plan(
+    statement: InsertByNameStatement,
+    state: &SessionState,
+) -> anyhow::Result<LogicalPlan> {
+    use datafusion::sql::parser::Statement as DFStatement;
+    use datafusion::sql::sqlparser::ast::Statement as SqlStatement;
+
+    let query = DFStatement::Statement(Box::new(SqlStatement::Query(statement.query)));
+    beacon_sql_parser::expression_depth::check_expression_depth(&query)?;
+    let input = state.statement_to_plan(query).await?;
+    let plan = LogicalPlan::Extension(Extension {
+        node: Arc::new(logical::InsertByNameNode {
+            table: crate::table_name::object_name_table_reference(&statement.table),
+            input,
+        }),
+    });
+    if statement.explain {
+        Ok(LogicalPlanBuilder::from(plan).explain(false, false)?.build()?)
+    } else {
+        Ok(plan)
+    }
 }
 
 /// Build the logical plan for `COMPACT TABLE <table> [WITH (...)]`.

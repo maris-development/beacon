@@ -68,6 +68,9 @@ INSERT INTO measurements
 SELECT id, name, value FROM staging;
 ```
 
+A plain `INSERT INTO` matches the columns by position. `INSERT INTO ... BY NAME` matches them by
+name. See [INSERT](/docs/2.1.0-rc3/sql/insert).
+
 ## `SELECT`
 
 Query a managed table like any other table:

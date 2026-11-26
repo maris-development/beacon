@@ -1,7 +1,10 @@
 use std::collections::HashMap;
 use std::fmt::Display;
 
-use datafusion::sql::{parser::Statement, sqlparser::ast::ObjectName};
+use datafusion::sql::{
+    parser::Statement,
+    sqlparser::ast::{ObjectName, Query},
+};
 
 #[derive(Debug, Clone)]
 pub enum BeaconStatement {
@@ -25,6 +28,25 @@ pub enum BeaconStatement {
     DropSecret(DropSecretStatement),
     ShowSecrets,
     Summarize(SummarizeStatement),
+    InsertByName(InsertByNameStatement),
+}
+
+/// [EXPLAIN] INSERT INTO <table> BY NAME <query>
+#[derive(Debug, Clone)]
+pub struct InsertByNameStatement {
+    pub table: ObjectName,
+    pub query: Box<Query>,
+    /// `EXPLAIN INSERT ...`: show the plan, do not write or widen.
+    pub explain: bool,
+}
+
+impl Display for InsertByNameStatement {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.explain {
+            write!(f, "EXPLAIN ")?;
+        }
+        write!(f, "INSERT INTO {} BY NAME {}", self.table, self.query)
+    }
 }
 
 /// SUMMARIZE <table> | SUMMARIZE <query>
@@ -312,6 +334,7 @@ impl Display for BeaconStatement {
             }
             Self::ShowSecrets => write!(f, "SHOW SECRETS"),
             Self::Summarize(s) => write!(f, "SUMMARIZE {}", s.source),
+            Self::InsertByName(s) => write!(f, "{s}"),
         }
     }
 }

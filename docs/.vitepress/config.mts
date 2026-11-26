@@ -286,6 +286,7 @@ export default defineConfig({
             { text: 'GROUP BY', link: '/docs/2.1.0-rc3/sql/group-by' },
             { text: 'JOIN', link: '/docs/2.1.0-rc3/sql/join' },
             { text: 'UNION BY NAME', link: '/docs/2.1.0-rc3/sql/union-by-name' },
+            { text: 'INSERT', link: '/docs/2.1.0-rc3/sql/insert' },
             { text: 'CREATE TABLE', link: '/docs/2.1.0-rc3/sql/managed-tables' },
             { text: 'CREATE EXTERNAL TABLE', link: '/docs/2.1.0-rc3/sql/create-external-table' },
             { text: 'CREATE VIEW', link: '/docs/2.1.0-rc3/sql/create-view' },

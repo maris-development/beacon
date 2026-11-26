@@ -120,11 +120,26 @@ impl QueryPlanner for BeaconQueryPlanner {
                 )))
             }
 
+            // DataFusion turns a planning error of an EXPLAIN into a plan row.
+            LogicalPlan::Explain(explain) if is_insert_by_name(&explain.plan) => {
+                default
+                    .create_physical_plan(&explain.plan, session_state)
+                    .await?;
+                default
+                    .create_physical_plan(logical_plan, session_state)
+                    .await
+            }
+
             // SELECT, COPY, beacon extension nodes (MV/REFRESH/ALTER/replace), and
             // the planned inputs above are all handled by the default planner.
             other => default.create_physical_plan(other, session_state).await,
         }
     }
+}
+
+/// `true` when `plan` is an `INSERT ... BY NAME` node.
+fn is_insert_by_name(plan: &LogicalPlan) -> bool {
+    matches!(plan, LogicalPlan::Extension(ext) if ext.node.as_any().is::<logical::InsertByNameNode>())
 }
 
 /// Lowers beacon's custom statement logical nodes to physical execution plans.
@@ -348,6 +363,17 @@ impl ExtensionPlanner for BeaconExtensionPlanner {
                 compact.options.clone(),
                 session,
             ))));
+        }
+
+        if let Some(insert) = any.downcast_ref::<logical::InsertByNameNode>() {
+            let child = physical_inputs.first().cloned().ok_or_else(|| {
+                datafusion::error::DataFusionError::Internal(
+                    "INSERT ... BY NAME is missing its planned input".to_string(),
+                )
+            })?;
+            return Ok(Some(Arc::new(
+                physical::InsertByNameExec::try_new(insert.table.clone(), child, session).await?,
+            )));
         }
 
         if let Some(comment) = any.downcast_ref::<logical::CommentOnNode>() {
