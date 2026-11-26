@@ -73,11 +73,11 @@ beacon-plugin-registry = { path = "../beacon-plugin/beacon-plugin-registry" }
 beacon-plugin-sdk = { path = "../beacon-plugin/beacon-plugin-sdk" }
 beacon-plugin-formats = { path = "../beacon-plugin/beacon-plugin-formats" }
 beacon-plugin-tables = { path = "../beacon-plugin/beacon-plugin-tables" }
-beacon-lance = { path = "../beacon-file-formats/beacon-lance" }
-beacon-delta = { path = "../beacon-file-formats/beacon-delta" }
-beacon-iceberg = { path = "../beacon-file-formats/beacon-iceberg" }
-beacon-icechunk = { path = "../beacon-file-formats/beacon-icechunk" }
-beacon-erddap = { path = "../beacon-file-formats/beacon-erddap" }
+beacon-lance = { path = "../beacon-table-providers/beacon-lance" }
+beacon-delta = { path = "../beacon-table-providers/beacon-delta" }
+beacon-iceberg = { path = "../beacon-table-providers/beacon-iceberg" }
+beacon-icechunk = { path = "../beacon-table-providers/beacon-icechunk" }
+beacon-erddap = { path = "../beacon-table-providers/beacon-erddap" }
 beacon-sql-databases = { path = "../beacon-sql-databases" }
 beacon-redb-store = { path = "../beacon-redb-store" }
 beacon-file-statistics = { path = "../beacon-file-statistics" }
@@ -102,3 +102,5 @@ flate2 = { workspace = true }
 tracing-subscriber = { workspace = true }
 # Unpacks the zipped Zarr stores that the zarr output format returns.
 zip = { workspace = true }
+# Builds the NetCDF scan source of the scan-totals test.
+beacon-nd-scan = { path = "../beacon-nd/beacon-nd-scan" }

@@ -12,6 +12,11 @@ released from a single `v*` tag. Releases before 2.0.0 are recorded in the
 
 ### Added
 
+- **Datasets store cache.** `BEACON_DATASETS_CACHE_ENABLED=true` keeps the files of a local datasets
+  store open between reads, which makes reads from NFS and slow disks faster.
+  `BEACON_DATASETS_CACHE_BLOCK_SIZE` also keeps file blocks in memory. Writes through Beacon show at
+  once, and changes by other programs show after `BEACON_DATASETS_CACHE_REVALIDATE_MS`. The cache is
+  off by default and has no effect on an S3 datasets store.
 - **SQL functions.** `CREATE [OR REPLACE] FUNCTION f(a BIGINT) RETURNS VARCHAR RETURN <expression>`
   makes a function from one scalar expression. Beacon puts the expression in place of each call, so
   filters on it are pushed down. `DROP FUNCTION`, `SHOW CREATE FUNCTION` and
@@ -46,6 +51,57 @@ released from a single `v*` tag. Releases before 2.0.0 are recorded in the
   file. See [CREATE EXTERNAL TABLE](docs/docs/2.1.0-rc3/sql/create-external-table.md).
 
 ### Changed
+
+- **NetCDF reads through the ND framework.** The NetCDF scan runs on the ND framework. The framework
+  gives the slices and the chunk prune. One large file reads on several partitions, and a filter on
+  a coordinate skips chunks. Beacon decodes the CF conventions of a NetCDF variable with the ND
+  framework. Some column types and values change:
+  - A CF time variable is `Timestamp(Microsecond)`, not `Timestamp(Nanosecond)`.
+  - Packed values (`scale_factor`, `add_offset`) get the float type of those attributes, for
+    example `Float32`. Else they are `Float64`.
+  - `missing_value`, with one or more values, turns the values into nulls.
+  - `valid_min`, `valid_max` and `valid_range` turn the values outside the range into nulls.
+  - A `_FillValue` of another type than the variable applies. Beacon casts it to the type of the
+    variable.
+  - A packed time variable decodes to a timestamp, not to `Float64`.
+  - A NaN or infinite time value is null.
+  - A time unit in singular form, as an abbreviation or with capitals (`hour`, `h`, `Days`)
+    decodes. A time of day or a zone in the reference date applies. Before, Beacon ignored it.
+  - Calendar `julian` decodes. Calendars such as `noleap` and `360_day` stay numbers.
+  - The unit `nanoseconds since ...` stays numbers in the stored type, for example `Int64`.
+    Beacon's NetCDF writer writes this unit for a `Timestamp(Nanosecond)` column, so such a file
+    reads back as numbers.
+  - A variable shorter than its unlimited dimension gives nulls past its length.
+  - Beacon leaves out a variable that it cannot model, with its attribute columns. An example is
+    `m(x, x)` with a repeated dimension. Beacon then also leaves out `m.units`.
+  - With `read_dimensions` and `skip_unbroadcastable`, Beacon skips a ragged NetCDF file with a
+    warning. It does not refuse the file.
+
+  A stored table keeps its stored column types. Refresh each NetCDF table with a packed time
+  column: use `REFRESH`, or drop the table and create it again. Else a stored `Float64` column gets
+  the microseconds since 1970, with no error.
+
+- **TIFF reads through the ND framework.** The TIFF scan runs on the ND framework. The column names
+  and types do not change. One large raster reads on several partitions, and a filter on
+  `geo.lat` or `geo.lon` skips tiles. `COUNT(*)` and `LIMIT` reach the scan.
+
+  **Breaking:** A TIFF table does not support `PARTITIONED BY` now. A query on a stored partitioned
+  TIFF table gives an error. Drop the table and create it again without `PARTITIONED BY`.
+
+- **HDF5 reads through the ND framework.** The HDF5 scan runs on the ND framework, and HDF5 uses the
+  NetCDF CF decode. The column names do not change: nested groups, compound members, group
+  attributes and the OptoDAS convention read as before. Some column types and values change:
+  - A CF time variable is `Timestamp(Microsecond)`, not `Timestamp(Nanosecond)`. The OptoDAS
+    `time` column stays `Timestamp(Nanosecond)`.
+  - Packed values get the float type of `scale_factor` or `add_offset`, for example `Float32`.
+  - `missing_value`, `valid_min`, `valid_max` and `valid_range` turn values into nulls.
+  - An attribute with more than one value gives no column.
+  - `COUNT(*)` gives an error. Use `COUNT(column)`.
+
+  **Breaking:** An HDF5 table does not support `PARTITIONED BY` now. A query on a stored
+  partitioned HDF5 table gives an error. Drop the table and create it again without
+  `PARTITIONED BY`. Refresh each HDF5 table with a CF time column: use `REFRESH`, or drop the
+  table and create it again.
 
 - **The server owns users and roles.** The engine has no users, no roles and no identity. The server
   checks each request, and it gives the engine the access rules of the caller. The server keeps
@@ -92,6 +148,13 @@ released from a single `v*` tag. Releases before 2.0.0 are recorded in the
   no new object at the target. ([#658](https://github.com/maris-development/beacon/issues/658))
 
 ### Removed
+
+- **`COUNT(*)` on NetCDF tables.** A NetCDF query must read at least one column of the file. Use
+  `COUNT(column)`.
+- **`PARTITIONED BY` on NetCDF tables.** A query on a partitioned NetCDF table gives an error.
+  A crawler makes NetCDF tables without partition columns.
+- **Ragged NetCDF files** through `STORED AS NC` and `read_netcdf`. Use the HDF5 format for these
+  files, for example World Ocean Database files.
 
 - **Users in the embedded database.** `beacondb.connect()` has no `auth`, `username`, `password`,
   `token`, `admin_username`, `admin_password` and `anonymous` arguments. `Connection.connect_as()`,

@@ -25,7 +25,7 @@ SELECT * FROM read_netcdf_schema('argo/**/*.nc');
 
 | column_name | data_type | nullable |
 |---|---|---|
-| JULD | Timestamp(Nanosecond) | true |
+| JULD | Timestamp(Microsecond) | true |
 | LATITUDE | Float64 | true |
 | LONGITUDE | Float64 | true |
 | PRES | Float64 | true |

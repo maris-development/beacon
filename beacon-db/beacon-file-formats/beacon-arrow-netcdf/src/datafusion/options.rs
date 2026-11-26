@@ -1,53 +1,78 @@
 use std::{collections::HashMap, num::NonZeroUsize};
 
 use beacon_datafusion_ext::format_options::{format_option, parse_bool_option};
+use beacon_nd_dataset::GridSelection;
+use beacon_nd_scan::NdScanOptions;
 use datafusion::common::exec_datafusion_err;
 
 use crate::attributes::CombineAttrs;
 
-/// Configuration options for the NetCDF file format in DataFusion queries.
-///
-/// Controls both reading (schema inference, dimension handling) and writing
-/// (flat vs. gridded output mode, flat output options).
-#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
+/// The options of one NetCDF table: how it reads, and how it writes.
+#[derive(Debug, Default, Clone)]
 pub struct NetcdfOptions {
-    /// Column names whose unique values should be tracked during execution
-    /// for downstream consumers (e.g. sink nodes).
-    #[serde(default)]
-    pub unique_value_columns: Vec<String>,
-    /// Number of rows per batch when replaying buffered data.
-    #[serde(default = "default_replay_batch_size")]
-    pub replay_batch_size: usize,
-    /// Columns to treat as NetCDF dimensions when **reading**.
-    ///
-    /// When `Some`, the reader unpacks the listed dimensions into extra
-    /// columns in the resulting Arrow schema.
-    #[serde(default)]
+    /// The dimensions to read. `None` selects a set that broadcasts.
     pub read_dimensions: Option<Vec<String>>,
     /// Skip a file that does not fit `read_dimensions`, with a warning,
-    /// instead of failing the query.
-    #[serde(default)]
+    /// in place of an error.
     pub skip_unbroadcastable: bool,
-    /// Skip a file the reader cannot open, with a warning, instead of failing
-    /// the query.
-    #[serde(default)]
+    /// Skip a file the reader cannot open, with a warning, in place of an error.
     pub skip_invalid_files: bool,
-    /// Columns to use as NetCDF dimensions when **writing**.
+    /// The columns that become dimensions on write.
     ///
-    /// * `None` / empty → flat output via [`NetCDFSink`](super::sink::NetCDFSink)
-    ///   with a single `obs` dimension.
-    /// * `Some(["lat", "lon", …])` → gridded output via
-    ///   [`NetCDFNdSink`](super::sink::NetCDFNdSink) where the listed columns
-    ///   become named dimensions and remaining columns become data variables.
-    #[serde(default)]
+    /// * `None` or empty: flat output on one `obs` dimension, through
+    ///   [`NetCDFSink`](super::sink::NetCDFSink).
+    /// * `Some(["lat", "lon"])`: gridded output through
+    ///   [`NetCDFNdSink`](super::sink::NetCDFNdSink). The other columns become
+    ///   data variables on those dimensions.
     pub write_dimensions: Option<Vec<String>>,
     /// Options of the flat writer.
-    #[serde(default)]
     pub writer: NetcdfWriterOptions,
 }
 
-fn default_replay_batch_size() -> usize {
-    128 * 1024
+impl NetcdfOptions {
+    /// Apply the keys of `CREATE EXTERNAL TABLE ... OPTIONS (...)` and `COPY ... OPTIONS (...)`.
+    pub fn apply_format_options(
+        &mut self,
+        format_options: &HashMap<String, String>,
+    ) -> datafusion::error::Result<()> {
+        if let Some(value) = format_option(format_options, "read_dimensions") {
+            self.read_dimensions = Some(
+                value
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect(),
+            );
+        }
+        if let Some(value) = format_option(format_options, "skip_unbroadcastable") {
+            self.skip_unbroadcastable = parse_bool_option("skip_unbroadcastable", value)?;
+        }
+        if let Some(value) = format_option(format_options, "skip_invalid_files") {
+            self.skip_invalid_files = parse_bool_option("skip_invalid_files", value)?;
+        }
+        // A stored table can hold this option. It selects nothing.
+        if let Some(value) = format_option(format_options, "use_rust_reader") {
+            if !parse_bool_option("use_rust_reader", value)? {
+                tracing::warn!(
+                    "the NetCDF option 'use_rust_reader' has no effect; netcdf-c reads are removed"
+                );
+            }
+        }
+        self.writer.apply_format_options(format_options)
+    }
+
+    /// The options of the ND framework scan. A NetCDF file has no minimum slice size.
+    pub fn scan_options(&self) -> NdScanOptions {
+        NdScanOptions {
+            grid: match &self.read_dimensions {
+                None => GridSelection::PerFile,
+                Some(list) => GridSelection::Given(list.clone()),
+            },
+            skip_unbroadcastable: self.skip_unbroadcastable,
+            skip_invalid_files: self.skip_invalid_files,
+            min_slice_size: Some(0),
+        }
+    }
 }
 
 /// Options of the flat NetCDF writer. The query API shows them as `NetcdfOutputOptions`.
@@ -200,6 +225,25 @@ mod tests {
         let mut options = NetcdfWriterOptions::default();
         options.apply_format_options(&map)?;
         Ok(options)
+    }
+
+    #[test]
+    fn the_scan_options_map_the_read_options() {
+        let defaults = NetcdfOptions::default().scan_options();
+        assert_eq!(defaults.grid, GridSelection::PerFile);
+        assert!(!defaults.skip_unbroadcastable && !defaults.skip_invalid_files);
+        assert_eq!(defaults.min_slice_size, Some(0));
+
+        let given = NetcdfOptions {
+            read_dimensions: Some(vec!["lat".to_string()]),
+            skip_unbroadcastable: true,
+            skip_invalid_files: true,
+            ..NetcdfOptions::default()
+        }
+        .scan_options();
+        assert_eq!(given.grid, GridSelection::Given(vec!["lat".to_string()]));
+        assert!(given.skip_unbroadcastable && given.skip_invalid_files);
+        assert_eq!(given.min_slice_size, Some(0));
     }
 
     #[test]

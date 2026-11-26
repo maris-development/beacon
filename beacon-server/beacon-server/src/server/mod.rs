@@ -34,6 +34,7 @@ use beacon_core::runtime::Runtime;
 use beacon_core::runtime_builder::RuntimeBuilder;
 use beacon_core::settings::{SqlSettings, SqlStreamCoalesceSettings};
 use beacon_datafusion_ext::listing_factory::RootStore;
+use beacon_object_store::cached_local::CachedLocalFileSystem;
 use beacon_server_config::Config;
 use datafusion::execution::object_store::ObjectStoreUrl;
 use object_store::ObjectStore;
@@ -306,6 +307,8 @@ impl Server {
 
 /// Build the datasets store: the bucket named by `BEACON_S3_BUCKET` when
 /// `BEACON_S3_DATASETS` is set, otherwise the local `datasets/` directory.
+/// `BEACON_DATASETS_CACHE_ENABLED` puts a handle and block cache in front of
+/// the local directory only.
 ///
 /// Returns the store together with the [`RootStore`] describing the same data for
 /// native readers (netCDF-c), which open by path/URL instead of going through the
@@ -317,7 +320,21 @@ fn build_datasets_store(config: &Config) -> anyhow::Result<(Arc<dyn ObjectStore>
         let dir = config.data.datasets.clone();
         let store = object_store::local::LocalFileSystem::new_with_prefix(&dir)
             .with_context(|| format!("failed to open the datasets store at {}", dir.display()))?;
-        return Ok((Arc::new(store), RootStore::FileSystem(dir)));
+        let cache = &config.datasets_cache;
+        let store: Arc<dyn ObjectStore> = if cache.enabled {
+            tracing::info!(
+                max_open_files = cache.max_open_files,
+                handle_idle_secs = cache.handle_idle_secs,
+                revalidate_ms = cache.revalidate_ms,
+                block_size = cache.block_size,
+                block_cache_bytes = cache.block_cache_bytes,
+                "datasets store uses the cached local file system"
+            );
+            Arc::new(CachedLocalFileSystem::new(store, cache.options()))
+        } else {
+            Arc::new(store)
+        };
+        return Ok((store, RootStore::FileSystem(dir)));
     }
 
     // `Config::load` rejects an S3 datasets store without a bucket, so this only fires for
@@ -417,3 +434,32 @@ async fn build_runtime(
 
 /// The username unauthenticated requests resolve to when anonymous access is on.
 pub const ANONYMOUS_USERNAME: &str = "anonymous";
+
+#[cfg(test)]
+mod tests {
+    use super::build_datasets_store;
+
+    /// The datasets store type for a local data root with the cache on or off.
+    fn store_name(enabled: bool) -> String {
+        let root = tempfile::tempdir().expect("create temp data dir");
+        let mut config = beacon_server_config::Config::load().expect("load config");
+        config.data.datasets = root.path().join("datasets");
+        config.s3.datasets_on_s3 = false;
+        config.datasets_cache.enabled = enabled;
+        std::fs::create_dir_all(&config.data.datasets).expect("create datasets dir");
+        let (store, _root) = build_datasets_store(&config).expect("build datasets store");
+        store.to_string()
+    }
+
+    #[test]
+    fn datasets_store_is_cached_when_enabled() {
+        let name = store_name(true);
+        assert!(name.starts_with("CachedLocalFileSystem"), "got: {name}");
+    }
+
+    #[test]
+    fn datasets_store_is_stock_when_disabled() {
+        let name = store_name(false);
+        assert!(name.starts_with("LocalFileSystem"), "got: {name}");
+    }
+}

@@ -12,7 +12,7 @@ anyhow = { workspace = true }
 arrow = { workspace = true }
 beacon-datafusion-ext = { path = "../beacon-datafusion-ext" }
 beacon-external-table = { path = "../beacon-external-table" }
-beacon-lance = { path = "../beacon-file-formats/beacon-lance" }
+beacon-lance = { path = "../beacon-table-providers/beacon-lance" }
 datafusion = { workspace = true }
 futures = { workspace = true }
 lance = { workspace = true }

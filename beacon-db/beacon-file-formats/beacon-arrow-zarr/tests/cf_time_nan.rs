@@ -9,6 +9,7 @@
 
 use std::sync::Arc;
 
+use arrow::datatypes::{DataType, TimeUnit};
 use beacon_arrow_zarr::datafusion::ZarrFormat;
 use beacon_arrow_zarr::reader::schema_from_group_path;
 use beacon_arrow_zarr::util::ZarrStorage;
@@ -81,7 +82,6 @@ async fn a_nan_time_does_not_kill_a_schema_read() {
         "/",
         None,
         false,
-        None,
         &beacon_datafusion_ext::type_widening::ArrowTypeWidening::default_extension(),
     )
     .await
@@ -89,14 +89,16 @@ async fn a_nan_time_does_not_kill_a_schema_read() {
 
     let names: Vec<&String> = schema.fields().iter().map(|f| f.name()).collect();
     assert!(names.contains(&&"time".to_string()), "time is in {names:?}");
+    assert_eq!(
+        schema.field_with_name("time").unwrap().data_type(),
+        &DataType::Timestamp(TimeUnit::Microsecond, None)
+    );
 }
 
 /// Reading the values must not panic, and the NaN must arrive as null.
 ///
-/// A cell that is not a time decodes to `NO_TIME` — `i64::MIN` nanoseconds, the
-/// year -292277 — which the nd layer turns into a null because the backend
-/// reports it as its fill value. Without that fallback the cell would reach a
-/// query as that date, silently.
+/// The CF time decode turns a value that is not a time into a null. Without
+/// that guard the cell would reach a query as some date, silently.
 #[tokio::test]
 async fn a_nan_time_arrives_as_null_and_the_rest_survive() {
     let dir = tempfile::tempdir().unwrap();

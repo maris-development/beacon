@@ -210,21 +210,14 @@ Beacon reads GeoTIFF and Cloud-Optimized GeoTIFF files.
 SELECT * FROM read_tiff('rasters/elevation.tif')
 ```
 
-### Tag attributes
+### Columns
 
-Beacon shows the TIFF tags of a band as extra columns. It uses the pattern `<band>.<attribute>`. An
-attribute column keeps the type from the file: string, integer, float and so on. A file tag belongs
-to no band. It uses a leading dot: `.<attribute>`. Quote these column names, because they contain a
-dot.
+Each band is a column: `band.0`, `band.1` and so on. `geo.lat` and `geo.lon` give the pixel
+centers. The TIFF tags are the `image.*` and `geo.*` columns. Quote these column names, because they
+contain a dot. See [GeoTIFF](/docs/2.1.0-rc3/formats/geotiff#columns) for the full list.
 
 ```sql
--- Band attribute
-SELECT band_1, "band_1.nodata", "band_1.scale"
-FROM read_tiff('rasters/elevation.tif')
-LIMIT 1
-
--- File-level global tag
-SELECT ".crs", band_1
+SELECT "band.0", "geo.lon", "geo.lat", "geo.crs", "image.width"
 FROM read_tiff('rasters/elevation.tif')
 LIMIT 1
 ```

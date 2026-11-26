@@ -92,6 +92,41 @@ async fn a_netcdf_table_without_read_dimensions_reads_the_default_grid() {
     );
 }
 
+/// A table stored with a nanosecond `time` column reads the instants of the
+/// file. The format decodes CF time to microseconds; the scan casts to the stored type.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stored_nanosecond_time_column_reads_the_same_instants() {
+    use arrow::array::{Array, TimestampNanosecondArray};
+    use arrow::datatypes::{DataType, TimeUnit};
+
+    let rt = runtime("options-nc-stored-nanosecond-time").await;
+    copy_gridded_netcdf(&rt, "grid.nc");
+
+    rt.sql("CREATE EXTERNAL TABLE grid (time TIMESTAMP) STORED AS NC LOCATION 'grid.nc'")
+        .await;
+
+    let batches = rt.sql("SELECT time FROM grid").await;
+    let times: Vec<i64> = batches
+        .iter()
+        .flat_map(|batch| {
+            let column = batch.column(0);
+            assert_eq!(
+                column.data_type(),
+                &DataType::Timestamp(TimeUnit::Nanosecond, None)
+            );
+            let column = column
+                .as_any()
+                .downcast_ref::<TimestampNanosecondArray>()
+                .unwrap();
+            assert_eq!(column.null_count(), 0);
+            column.values().to_vec()
+        })
+        .collect();
+    // `time` is 1014940800 seconds since 1981-01-01: 2013-03-01T00:00:00Z.
+    let micros = 1_362_096_000_000_000_i64;
+    assert_eq!(times, vec![micros * 1000]);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_zarr_table_honours_read_dimensions() {
     let rt = runtime("options-zarr-read-dimensions").await;

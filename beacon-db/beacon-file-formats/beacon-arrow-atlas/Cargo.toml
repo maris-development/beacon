@@ -28,7 +28,7 @@ parking_lot = { workspace = true }
 
 beacon-datafusion-ext = { path = "../../beacon-datafusion-ext" }
 beacon-nd-execution = { path = "../../beacon-nd-execution" }
-beacon-nd-array = { path = "../beacon-nd-array" }
+beacon-nd-array = { path = "../../beacon-nd/beacon-nd-array" }
 beacon-common = { path = "../../beacon-common" }
 
 [dev-dependencies]

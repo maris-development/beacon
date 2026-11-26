@@ -109,6 +109,15 @@ fn accepts_extension(extensions: &FormatExtensions, format: &str, extension: &st
     }
 }
 
+/// The formats that refuse `PARTITIONED BY`. The crawler reads their `key=value/`
+/// directories as plain sub-directories.
+const FORMATS_WITHOUT_PARTITIONS: [&str; 2] = ["nc", "tiff"];
+
+/// Whether a table of `format` can have partition columns.
+fn supports_partitions(format: &str) -> bool {
+    !FORMATS_WITHOUT_PARTITIONS.contains(&format)
+}
+
 /// Accumulator while grouping files by `(format, extension, base)`.
 struct Group {
     format: String,
@@ -196,14 +205,14 @@ pub fn group_into_tables(
     let candidates = groups
         .into_values()
         .map(|g| CandidateTable {
-            format: g.format,
-            extension: g.extension,
-            base: g.base,
-            partition_cols: if g.partitioned {
+            partition_cols: if g.partitioned && supports_partitions(&g.format) {
                 g.keys.unwrap_or_default()
             } else {
                 Vec::new()
             },
+            format: g.format,
+            extension: g.extension,
+            base: g.base,
             recursive: g.partitioned,
             file_count: g.file_count,
         })
@@ -503,6 +512,33 @@ mod tests {
         let (cands, skipped) = group_into_tables(&datasets, &def(), &extensions());
         assert!(cands.is_empty());
         assert_eq!(skipped, ["d/a.ncml", "d/b.tsv"]);
+    }
+
+    #[test]
+    fn a_netcdf_collection_gets_no_partition_columns() {
+        let datasets = vec![
+            ds("obs/year=2023/a.nc", "nc"),
+            ds("obs/year=2024/b.nc", "nc"),
+        ];
+        let (cands, _) = group_into_tables(&datasets, &def(), &extensions());
+        assert_eq!(cands.len(), 1);
+        assert_eq!(cands[0].base, "obs");
+        assert!(cands[0].partition_cols.is_empty());
+        assert!(cands[0].recursive);
+        assert_eq!(cands[0].location(), "obs/**/*.nc");
+    }
+
+    #[test]
+    fn a_tiff_collection_gets_no_partition_columns() {
+        let datasets = vec![
+            ds("dem/year=2023/a.tiff", "tiff"),
+            ds("dem/year=2024/b.tiff", "tiff"),
+        ];
+        let (cands, _) = group_into_tables(&datasets, &def(), &extensions());
+        assert_eq!(cands.len(), 1);
+        assert_eq!(cands[0].base, "dem");
+        assert!(cands[0].partition_cols.is_empty());
+        assert_eq!(cands[0].location(), "dem/**/*.tiff");
     }
 
     #[test]

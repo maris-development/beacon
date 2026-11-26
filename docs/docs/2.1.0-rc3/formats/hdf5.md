@@ -12,12 +12,12 @@ Beacon recognizes `.h5` and `.hdf5`. It finds them in the dataset store automati
 
 ## The reader
 
-A netCDF-4 file **is** an HDF5 file. HDF5 behaves exactly like
-[NetCDF](/docs/2.1.0-rc3/formats/netcdf): the same data model, the same
-[array to table mapping](/docs/2.1.0-rc3/arrays-to-tables), the same
-[CF decoding](/docs/2.1.0-rc3/cf-decoding) and the same attribute columns.
+A netCDF-4 file **is** an HDF5 file. HDF5 has the data model of
+[NetCDF](/docs/2.1.0-rc3/formats/netcdf), the same
+[array to table mapping](/docs/2.1.0-rc3/arrays-to-tables), the same attribute columns and the same
+[CF decoding](/docs/2.1.0-rc3/cf-decoding) rules.
 
-Beacon reads HDF5 with a pure-Rust reader:
+Beacon reads HDF5 with the ND framework and a pure-Rust reader:
 
 | | Behavior |
 | --- | --- |
@@ -31,7 +31,7 @@ Beacon reads HDF5 with a pure-Rust reader:
 ## How a dataset becomes a column
 
 An HDF5 dataset reads as a variable. An HDF5 attribute reads as a `<dataset>.<attribute>` column,
-and a file attribute as `.<attribute>`.
+and a file attribute as `.<attribute>`. An attribute with more than one value gives no column.
 
 The reader adds two more shapes. Both use `/`, so quote the column name in SQL.
 
@@ -148,6 +148,11 @@ LOCATION 'experiments/';
 ```
 
 `STORED AS H5` is accepted as a synonym.
+
+An HDF5 table has two limits:
+
+- `PARTITIONED BY` is not supported. A query on a partitioned HDF5 table gives an error.
+- `COUNT(*)` reads no column, and an HDF5 scan needs one. Use `COUNT(column)`.
 
 ### `OPTIONS`
 

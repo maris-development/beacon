@@ -6,28 +6,35 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use arrow::datatypes::SchemaRef;
-use beacon_arrow_netcdf::datafusion::{statistics, NetCDFFormatFactory, NetcdfFormat};
+use arrow::datatypes::{Schema, SchemaRef};
+use beacon_arrow_netcdf::datafusion::{NetCDFFormatFactory, NetcdfFormat};
 use beacon_datafusion_ext::format_ext::{DatasetMetadata, FileFormatFactoryExt, SchemaOptions};
 use beacon_datafusion_ext::format_options::format_option;
 use beacon_datafusion_ext::listing_factory::ListingFactory;
 use beacon_datafusion_ext::type_widening::{label_by_object, session_widening};
+use beacon_nd_dataset::GridSelection;
+use beacon_nd_execution::exec::nd_scan_plan;
+use beacon_nd_scan::{
+    encoded_table_schema, file_statistics, open_for_read, to_datafusion, NdFileOpener,
+    NdScanOptions, NdSource,
+};
 use datafusion::{
-    catalog::{memory::DataSourceExec, Session},
-    common::{exec_datafusion_err, GetExt, Statistics},
+    catalog::Session,
+    common::{exec_datafusion_err, plan_err, GetExt, Statistics},
     datasource::{
         file_format::{file_compression_type::FileCompressionType, FileFormat, FileFormatFactory},
         listing::ListingTableUrl,
         physical_plan::{FileScanConfig, FileScanConfigBuilder, FileSinkConfig, FileSource},
         table_schema::TableSchema,
     },
-    physical_expr::LexRequirement,
+    error::DataFusionError,
+    physical_expr::{projection::ProjectionExprs, utils::collect_columns, LexRequirement},
     physical_plan::ExecutionPlan,
 };
 use object_store::{ObjectMeta, ObjectStore};
 
 use crate::{
-    source::Hdf5Source, Hdf5Config, Hdf5Convention, ReadOptions, HDF5_EXTENSIONS, HDF5_FORMAT_NAME,
+    Hdf5Config, Hdf5Convention, Hdf5Opener, ReadOptions, HDF5_EXTENSIONS, HDF5_FORMAT_NAME,
 };
 
 /// Parse a boolean value supplied through a `CREATE EXTERNAL TABLE` option.
@@ -195,7 +202,6 @@ impl FileFormatFactory for Hdf5FormatFactory {
         };
         Arc::new(self.build_format(options, self.inner.default()))
     }
-
 }
 
 impl FileFormatFactoryExt for Hdf5FormatFactory {
@@ -254,13 +260,25 @@ impl FileFormatFactoryExt for Hdf5FormatFactory {
         if hdf5.read_dimensions().is_some() {
             return None;
         }
-        Some(SchemaOptions::new("hdf5").str("rust").finish())
+        let convention = match hdf5.convention() {
+            Hdf5Convention::None => "none",
+            Hdf5Convention::OptoDas => "optodas",
+        };
+        // Each option that changes the schema is part of the key.
+        Some(
+            SchemaOptions::new("hdf5")
+                .str("nd")
+                .str(convention)
+                .bool(hdf5.unifies_phony_dimensions())
+                .bool(hdf5.skips_unbroadcastable())
+                .finish(),
+        )
     }
 }
 
 /// The HDF5 [`FileFormat`] on the pure-Rust reader.
 ///
-/// Reads go through [`crate::reader`]: no process-global lock, and byte ranges
+/// Reads go through the ND framework scan: no process-global lock, and byte ranges
 /// straight out of the scan's object store. Writes go to `writer`, which is a
 /// [`NetcdfFormat`]. The HDF5 reader does not write, so this crate writes
 /// with the NetCDF writer.
@@ -313,9 +331,62 @@ impl Hdf5Format {
     /// Always true. The HDF5 reader has no writer, so a write goes to the
     /// NetCDF format. A test can check this invariant.
     pub fn writes_with_netcdf_writer(&self) -> bool {
-        self.writer
-            .downcast_ref::<NetcdfFormat>()
-            .is_some()
+        self.writer.downcast_ref::<NetcdfFormat>().is_some()
+    }
+
+    fn opener(&self) -> Hdf5Opener {
+        Hdf5Opener::new(self.read)
+    }
+
+    /// The options of the ND framework scan. An HDF5 file has no minimum slice size.
+    fn scan_options(&self) -> NdScanOptions {
+        NdScanOptions {
+            grid: match &self.read_dimensions {
+                None => GridSelection::PerFile,
+                Some(list) => GridSelection::Given(list.clone()),
+            },
+            skip_unbroadcastable: self.skip_unbroadcastable,
+            skip_invalid_files: false,
+            min_slice_size: Some(0),
+        }
+    }
+
+    fn source(&self, table_schema: TableSchema) -> NdSource {
+        NdSource::new(Arc::new(self.opener()), self.scan_options(), table_schema)
+    }
+
+    /// The schema of one file. A file that a skip option passes over has no column.
+    async fn file_schema(
+        &self,
+        store: &Arc<dyn ObjectStore>,
+        object: &ObjectMeta,
+    ) -> datafusion::error::Result<SchemaRef> {
+        let opened = open_for_read(
+            &self.opener(),
+            Arc::clone(store),
+            object,
+            &self.scan_options(),
+        )
+        .await?;
+        let Some(dataset) = opened else {
+            return Ok(Arc::new(Schema::empty()));
+        };
+        Ok(Arc::new(beacon_nd_scan::file_schema(dataset.as_ref())))
+    }
+
+    /// The statistics of one file for the columns of `table_schema`.
+    async fn file_statistics(
+        &self,
+        store: &Arc<dyn ObjectStore>,
+        object: &ObjectMeta,
+        table_schema: &Schema,
+    ) -> datafusion::error::Result<Statistics> {
+        let dataset = self
+            .opener()
+            .open(Arc::clone(store), object)
+            .await
+            .map_err(to_datafusion)?;
+        file_statistics(dataset.as_ref(), table_schema).await
     }
 }
 
@@ -352,24 +423,32 @@ impl FileFormat for Hdf5Format {
             .execution
             .meta_fetch_concurrency
             .max(1);
-        let tasks: Vec<_> = objects
-            .iter()
-            .map(|object| {
-                crate::open::fetch_schema(
-                    store,
-                    object,
-                    self.read_dimensions.clone(),
-                    self.skip_unbroadcastable,
-                    self.read,
-                )
+        // An index, not a borrowed `ObjectMeta`: `async_trait` rejects a closure
+        // argument that holds a reference.
+        let schemas: Vec<SchemaRef> = futures::stream::iter(0..objects.len())
+            .map(|index| async move {
+                let object = &objects[index];
+                // A glob can match many files, so the error names the bad one.
+                self.file_schema(store, object).await.map_err(|e| {
+                    let message = format!(
+                        "Failed to infer the schema of HDF5 file '{}': {}",
+                        object.location,
+                        e.message()
+                    );
+                    // An unsupported file stays NotImplemented, so a caller can tell it apart.
+                    match e {
+                        DataFusionError::NotImplemented(_) => {
+                            DataFusionError::NotImplemented(message)
+                        }
+                        _ => exec_datafusion_err!("{message}"),
+                    }
+                })
             })
-            .collect();
-        let schemas: Vec<SchemaRef> = futures::stream::iter(tasks)
             .buffered(width)
             .try_collect()
             .await?;
         if schemas.is_empty() {
-            return Ok(Arc::new(arrow::datatypes::Schema::empty()));
+            return Ok(Arc::new(Schema::empty()));
         }
         // The rule of the session decides the result for a column that two
         // files describe differently. Each schema names its file, so a refused
@@ -377,10 +456,7 @@ impl FileFormat for Hdf5Format {
         session_widening(state)
             .merge_schemas(&label_by_object(objects, &schemas))
             .map_err(|e| {
-                exec_datafusion_err!(
-                    "Failed to merge the schemas of the HDF5 datasets: {}",
-                    e
-                )
+                exec_datafusion_err!("Failed to merge the schemas of the HDF5 datasets: {}", e)
             })
     }
 
@@ -391,29 +467,12 @@ impl FileFormat for Hdf5Format {
         table_schema: SchemaRef,
         object: &ObjectMeta,
     ) -> datafusion::error::Result<Statistics> {
-        // Unlike the netcdf-c path, this one can afford statistics: the reader
-        // is async, holds no global lock and reads byte ranges, so a cold query
-        // over a large collection stays parallel and does not block query
-        // serving. That is why the capability follows the reader.
         if !self.enable_statistics {
             return Ok(Statistics::new_unknown(&table_schema));
         }
-
-        // Reporting unknown rather than erroring is deliberate. Absent
-        // statistics are always a legal answer -- DataFusion prunes nothing and
-        // scans everything, which is correct, just slower.
-        let dataset = match crate::open::open_dataset(store, object, self.read).await {
-            Ok(dataset) => dataset,
-            Err(e) => {
-                tracing::warn!(
-                    "Failed to open HDF5 object {} for statistics: {e}",
-                    object.location
-                );
-                return Ok(Statistics::new_unknown(&table_schema));
-            }
-        };
-
-        Ok(statistics::statistics_for_dataset(&dataset, &table_schema)
+        // Unknown statistics are always a legal answer: DataFusion then prunes nothing.
+        Ok(self
+            .file_statistics(store, object, &table_schema)
             .await
             .unwrap_or_else(|e| {
                 tracing::warn!(
@@ -430,40 +489,31 @@ impl FileFormat for Hdf5Format {
         _state: &dyn Session,
         conf: FileScanConfig,
     ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
-        // The scan carries nd data as `beacon.nd`-encoded struct columns, so
-        // the file source's schema is the encoded form of the logical table
-        // schema. `NdSourceExec` decodes it and `NdBroadcastExec` broadcasts it
-        // back to the logical schema above the scan.
-        //
-        // The `PARTITIONED BY` columns are encoded with it. Their values come
-        // from a file's path rather than its contents, and the reader appends
-        // them per file, but they reach the plan the same way every other column
-        // does — so that one decoder reads the whole batch.
-        let encoded_file_schema = Arc::new(beacon_datafusion_ext::nd::encoded_schema(
-            conf.file_schema(),
-        ));
-        let table_schema = TableSchema::new(
-            encoded_file_schema,
-            beacon_nd_array::arrow::partition::encoded_partition_cols(
-                conf.table_partition_cols(),
-            ),
-        );
-        // Preserve a projection that the scan pushed down into the incoming
-        // source — rebuilding the source below would otherwise drop it.
+        let partition_columns: Vec<&str> = conf
+            .table_partition_cols()
+            .iter()
+            .map(|field| field.name().as_str())
+            .collect();
+        if !partition_columns.is_empty() {
+            return Err(DataFusionError::NotImplemented(format!(
+                "HDF5 does not support partitioned tables (PARTITIONED BY {})",
+                partition_columns.join(", ")
+            )));
+        }
+        // Keep a projection that the scan pushed into the incoming source.
         let projection = conf.file_source().projection().cloned();
-        let source = Hdf5Source::new(self.read_dimensions.clone(), self.read, table_schema)
-            .with_skip_unbroadcastable(self.skip_unbroadcastable)
+        if projection.as_ref().is_some_and(names_no_column) {
+            return plan_err!(
+                "an HDF5 scan needs at least one file column; use COUNT(column) in place of COUNT(*)"
+            );
+        }
+        let source = self
+            .source(encoded_table_schema(conf.file_schema()))
             .with_projection(projection);
         let conf = FileScanConfigBuilder::from(conf)
             .with_source(Arc::new(source))
             .build();
-
-        let data_source: Arc<dyn ExecutionPlan> = DataSourceExec::from_data_source(conf);
-        let nd_source = Arc::new(beacon_nd_execution::exec::NdSourceExec::try_new(
-            data_source,
-        )?);
-        let broadcast = beacon_nd_execution::exec::NdBroadcastExec::try_new(nd_source)?;
-        Ok(Arc::new(broadcast))
+        nd_scan_plan(conf)
     }
 
     /// Writes always use the NetCDF writer.
@@ -480,11 +530,15 @@ impl FileFormat for Hdf5Format {
     }
 
     fn file_source(&self, table_schema: TableSchema) -> Arc<dyn FileSource> {
-        Arc::new(
-            Hdf5Source::new(self.read_dimensions.clone(), self.read, table_schema)
-                .with_skip_unbroadcastable(self.skip_unbroadcastable),
-        )
+        Arc::new(self.source(table_schema))
     }
+}
+
+/// Whether `projection` reads no column, as `COUNT(*)` does. An HDF5 table has no partition column.
+fn names_no_column(projection: &ProjectionExprs) -> bool {
+    projection
+        .iter()
+        .all(|item| collect_columns(&item.expr).is_empty())
 }
 
 #[cfg(test)]
@@ -650,6 +704,33 @@ mod tests {
             .unwrap();
         let hdf5 = format.downcast_ref::<Hdf5Format>().unwrap();
         assert!(!hdf5.unifies_phony_dimensions());
+    }
+
+    /// Each option that changes the schema gives its own schema cache key.
+    #[test]
+    fn the_schema_options_give_their_own_cache_keys() {
+        let ctx = session();
+        let f = factory("hdf5", Hdf5Config::default());
+        let key = |options: &[(&str, &str)]| {
+            let options: HashMap<String, String> = options
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+            let format = f.create(&ctx.state(), &options).unwrap();
+            f.schema_options_fingerprint(format.as_ref())
+        };
+        let default = key(&[]);
+        let optodas = key(&[("convention", "optodas")]);
+        let plain = key(&[("unify_phony_dimensions", "false")]);
+        assert!(default.is_some());
+        assert_ne!(default, optodas);
+        assert_ne!(default, plain);
+        assert_ne!(optodas, plain);
+        // The ND framework schema differs from the old reader's, so the old key is invalid.
+        assert_ne!(
+            default,
+            Some(SchemaOptions::new("hdf5").str("rust").finish())
+        );
     }
 
     /// The runtime setting decides when the table says nothing.

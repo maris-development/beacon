@@ -315,7 +315,6 @@ impl OutputFormat {
                         )
                     })?
                     .clone();
-                factory.options.unique_value_columns = dimension_columns.clone();
                 factory.options.write_dimensions = Some(dimension_columns.clone());
 
                 Ok(format_as_file_type(Arc::new(factory)))

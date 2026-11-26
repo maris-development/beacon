@@ -25,6 +25,10 @@ pub enum ConfigError {
     #[error("invalid storage configuration: {0}")]
     InvalidStorage(String),
 
+    /// A `BEACON_DATASETS_CACHE_*` value is out of range while the cache is on.
+    #[error("invalid datasets cache configuration: {0}")]
+    InvalidDatasetsCache(String),
+
     /// `BEACON_LOG_LEVEL` was set to something other than a known log level.
     #[error("invalid BEACON_LOG_LEVEL: {0}")]
     InvalidLogLevel(String),

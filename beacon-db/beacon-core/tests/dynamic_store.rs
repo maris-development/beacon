@@ -107,11 +107,28 @@ fn parquet_fixture() -> PathBuf {
         .join("test-datasets/test_file.parquet")
 }
 
-fn netcdf_fixture() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .join("beacon-file-formats/beacon-arrow-netcdf/test_files/wod_ctd_1964.nc")
+/// Write one small regular NetCDF file: column `V0` holds `0.0, 1.0, ..` for `rows` rows.
+fn write_regular_netcdf(path: &Path, rows: usize) {
+    use std::sync::Arc;
+
+    use arrow::array::{ArrayRef, Float64Array};
+    use arrow::datatypes::{DataType, Field, Schema};
+    use beacon_arrow_netcdf::encoders::default::DefaultEncoder;
+    use beacon_arrow_netcdf::writer::ArrowRecordBatchWriter;
+
+    let schema = Arc::new(Schema::new(vec![Field::new(
+        "V0",
+        DataType::Float64,
+        false,
+    )]));
+    let values: ArrayRef =
+        Arc::new(Float64Array::from_iter_values((0..rows).map(|row| row as f64)));
+    let batch = RecordBatch::try_new(schema.clone(), vec![values]).expect("a batch");
+
+    let mut writer =
+        ArrowRecordBatchWriter::<DefaultEncoder>::new(path, schema).expect("a netCDF writer");
+    writer.write_record_batch(batch).expect("write the batch");
+    writer.finish().expect("finish the file");
 }
 
 // --------------------------------------------------------------------------
@@ -335,7 +352,7 @@ async fn read_csv_over_absolute_path_and_globs() {
 async fn read_parquet_and_netcdf_over_absolute_paths() {
     let (_root, dir) = temp_dir();
     std::fs::copy(parquet_fixture(), dir.join("data.parquet")).expect("copy parquet fixture");
-    std::fs::copy(netcdf_fixture(), dir.join("wod.nc")).expect("copy netcdf fixture");
+    write_regular_netcdf(&dir.join("regular.nc"), 4000);
 
     let rt = dynamic_runtime().await;
 
@@ -358,7 +375,7 @@ async fn read_parquet_and_netcdf_over_absolute_paths() {
         &rt,
         &format!(
             "SELECT * FROM read_netcdf('{}') LIMIT 5",
-            dir.join("wod.nc").display()
+            dir.join("regular.nc").display()
         ),
     )
     .await;
