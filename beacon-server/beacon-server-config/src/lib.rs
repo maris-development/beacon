@@ -1,6 +1,9 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
+use beacon_object_store::cached_local::CachedLocalOptions;
+use bytesize::ByteSize;
 use envconfig::Envconfig;
 
 pub mod error;
@@ -39,6 +42,7 @@ pub struct Config {
     /// Resolved data-directory paths (root + sub-directories).
     pub data: DataDirsConfig,
     pub s3: S3Config,
+    pub datasets_cache: DatasetsCacheConfig,
     pub secrets: SecretsConfig,
 }
 
@@ -347,6 +351,43 @@ impl S3Config {
     }
 }
 
+/// Settings of the cache in front of the local datasets store.
+///
+/// The cache keeps file handles open and can keep file blocks in memory. An S3
+/// datasets store ignores these settings.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DatasetsCacheConfig {
+    /// Whether the local datasets store uses the cache. When false every other
+    /// field here is inert.
+    pub enabled: bool,
+    /// The target number of open file handles. The cache can hold more for a short time.
+    pub max_open_files: u64,
+    /// The seconds an unused file handle stays open.
+    pub handle_idle_secs: u64,
+    /// The milliseconds after which a cached handle checks its file again.
+    pub revalidate_ms: u64,
+    /// The block size in bytes. 0 turns the block cache off.
+    pub block_size: u64,
+    /// The capacity of the block cache in bytes.
+    pub block_cache_bytes: u64,
+}
+
+impl DatasetsCacheConfig {
+    /// The store options these settings give.
+    ///
+    /// The coalesce gap and the stream chunk keep their default values.
+    pub fn options(&self) -> CachedLocalOptions {
+        CachedLocalOptions {
+            max_open_files: self.max_open_files,
+            handle_idle: Duration::from_secs(self.handle_idle_secs),
+            revalidate_after: Duration::from_millis(self.revalidate_ms),
+            block_size: self.block_size,
+            block_cache_bytes: self.block_cache_bytes,
+            ..CachedLocalOptions::default()
+        }
+    }
+}
+
 #[derive(Debug, Envconfig)]
 struct RawConfig {
     #[envconfig(from = "BEACON_ADMIN_USERNAME", default = "beacon-admin")]
@@ -449,6 +490,20 @@ struct RawConfig {
     aws_endpoint: Option<String>,
     #[envconfig(from = "AWS_REGION")]
     aws_region: Option<String>,
+
+    // Cache in front of the local datasets store. Off by default.
+    #[envconfig(from = "BEACON_DATASETS_CACHE_ENABLED", default = "false")]
+    datasets_cache_enabled: bool,
+    #[envconfig(from = "BEACON_DATASETS_CACHE_MAX_OPEN_FILES", default = "256")]
+    datasets_cache_max_open_files: u64,
+    #[envconfig(from = "BEACON_DATASETS_CACHE_HANDLE_IDLE_SECS", default = "30")]
+    datasets_cache_handle_idle_secs: u64,
+    #[envconfig(from = "BEACON_DATASETS_CACHE_REVALIDATE_MS", default = "1000")]
+    datasets_cache_revalidate_ms: u64,
+    #[envconfig(from = "BEACON_DATASETS_CACHE_BLOCK_SIZE", default = "0")]
+    datasets_cache_block_size: ByteSize,
+    #[envconfig(from = "BEACON_DATASETS_CACHE_BLOCK_CACHE_SIZE", default = "256MiB")]
+    datasets_cache_block_cache_size: ByteSize,
 
     // Maximum size, in bytes, accepted for a single dataset upload through the
     // admin API. `0` disables the cap. Default ~5 GiB.
@@ -753,6 +808,14 @@ impl From<RawConfig> for Config {
                 endpoint: raw.aws_endpoint,
                 region: raw.aws_region,
             },
+            datasets_cache: DatasetsCacheConfig {
+                enabled: raw.datasets_cache_enabled,
+                max_open_files: raw.datasets_cache_max_open_files,
+                handle_idle_secs: raw.datasets_cache_handle_idle_secs,
+                revalidate_ms: raw.datasets_cache_revalidate_ms,
+                block_size: raw.datasets_cache_block_size.as_u64(),
+                block_cache_bytes: raw.datasets_cache_block_cache_size.as_u64(),
+            },
             // Decoded and validated in `Config::load` (see `secrets_key`).
             secrets: SecretsConfig { master_key: None },
         }
@@ -770,6 +833,53 @@ fn validate_storage(s3: &S3Config) -> Result<()> {
              the bucket is never inferred from AWS_ENDPOINT"
                 .to_string(),
         ));
+    }
+    Ok(())
+}
+
+/// Rejects datasets cache settings that the store cannot use.
+///
+/// Checks only an enabled cache. The message names the variable to change.
+fn validate_datasets_cache(cache: &DatasetsCacheConfig) -> Result<()> {
+    if !cache.enabled {
+        return Ok(());
+    }
+    cache.options().validate().map_err(|message| {
+        // The store names its fields; the operator sets variables.
+        let message = [
+            ("max_open_files", "BEACON_DATASETS_CACHE_MAX_OPEN_FILES"),
+            ("block_size", "BEACON_DATASETS_CACHE_BLOCK_SIZE"),
+        ]
+        .into_iter()
+        .find_map(|(field, var)| {
+            message
+                .strip_prefix(field)
+                .map(|rest| format!("{var}{rest}"))
+        })
+        .unwrap_or(message);
+        // A decimal unit such as 1MB gives a size that is no power of two.
+        let message = if message.starts_with("BEACON_DATASETS_CACHE_BLOCK_SIZE")
+            && !cache.block_size.is_power_of_two()
+        {
+            format!("{message}; use binary units such as 64KiB or 1MiB; 1MB is 1000000 bytes")
+        } else {
+            message
+        };
+        ConfigError::InvalidDatasetsCache(message)
+    })?;
+    // A time to idle of 0 closes each handle at once.
+    if cache.handle_idle_secs == 0 {
+        return Err(ConfigError::InvalidDatasetsCache(
+            "BEACON_DATASETS_CACHE_HANDLE_IDLE_SECS must be at least 1".to_string(),
+        ));
+    }
+    // A cache smaller than one block never keeps a block.
+    if cache.block_size > 0 && cache.block_cache_bytes < cache.block_size {
+        return Err(ConfigError::InvalidDatasetsCache(format!(
+            "BEACON_DATASETS_CACHE_BLOCK_CACHE_SIZE must be at least BEACON_DATASETS_CACHE_BLOCK_SIZE \
+             ({} bytes) when the block cache is on, got {} bytes",
+            cache.block_size, cache.block_cache_bytes
+        )));
     }
     Ok(())
 }
@@ -905,6 +1015,7 @@ impl Config {
 
         validate_threads(&config.server)?;
         validate_storage(&config.s3)?;
+        validate_datasets_cache(&config.datasets_cache)?;
 
         // Create the configured data directories (idempotent). `db_file` is a file,
         // not a directory — its parent is created here. The local datasets
@@ -1019,7 +1130,8 @@ fn type_widening(strategy: &str, on_conflict: &str) -> Arc<dyn ArrowTypeWidening
 mod tests {
     use super::{
         decode_master_key, normalize_base_path, normalize_log_level, parse_startup_plugins,
-        validate_storage, validate_threads, Config, Hdf5Convention, LogOutput, PathBuf, RawConfig,
+        validate_datasets_cache, validate_storage, validate_threads, Config, Hdf5Convention,
+        LogOutput, PathBuf, RawConfig,
     };
     use envconfig::Envconfig;
     use std::collections::HashMap;
@@ -1263,6 +1375,162 @@ mod tests {
         )
         .expect("bucket supplied");
         validate_storage(&config(&[]).s3).expect("local server needs no bucket");
+    }
+
+    #[test]
+    fn datasets_cache_defaults() {
+        let cache = config(&[]).datasets_cache;
+        assert!(!cache.enabled);
+        assert_eq!(cache.max_open_files, 256);
+        assert_eq!(cache.handle_idle_secs, 30);
+        assert_eq!(cache.revalidate_ms, 1000);
+        assert_eq!(cache.block_size, 0);
+        assert_eq!(cache.block_cache_bytes, 268_435_456);
+    }
+
+    #[test]
+    fn datasets_cache_reads_variables() {
+        let cache = config(&[
+            ("BEACON_DATASETS_CACHE_ENABLED", "true"),
+            ("BEACON_DATASETS_CACHE_MAX_OPEN_FILES", "64"),
+            ("BEACON_DATASETS_CACHE_HANDLE_IDLE_SECS", "5"),
+            ("BEACON_DATASETS_CACHE_REVALIDATE_MS", "250"),
+            ("BEACON_DATASETS_CACHE_BLOCK_SIZE", "65536"),
+            ("BEACON_DATASETS_CACHE_BLOCK_CACHE_SIZE", "1048576"),
+        ])
+        .datasets_cache;
+        assert!(cache.enabled);
+        assert_eq!(cache.max_open_files, 64);
+        assert_eq!(cache.handle_idle_secs, 5);
+        assert_eq!(cache.revalidate_ms, 250);
+        assert_eq!(cache.block_size, 65536);
+        assert_eq!(cache.block_cache_bytes, 1_048_576);
+
+        let opts = cache.options();
+        assert_eq!(opts.max_open_files, 64);
+        assert_eq!(opts.handle_idle, std::time::Duration::from_secs(5));
+        assert_eq!(opts.revalidate_after, std::time::Duration::from_millis(250));
+        assert_eq!(opts.block_size, 65536);
+        assert_eq!(opts.block_cache_bytes, 1_048_576);
+    }
+
+    #[test]
+    fn datasets_cache_rejects_bad_block_size() {
+        let cache = config(&[
+            ("BEACON_DATASETS_CACHE_ENABLED", "true"),
+            ("BEACON_DATASETS_CACHE_BLOCK_SIZE", "1000"),
+        ])
+        .datasets_cache;
+        let err = validate_datasets_cache(&cache).expect_err("1000 is no power of two");
+        assert!(
+            err.to_string().contains("BEACON_DATASETS_CACHE_BLOCK_SIZE"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn datasets_cache_sizes_accept_units() {
+        let block_size = |value| {
+            config(&[("BEACON_DATASETS_CACHE_BLOCK_SIZE", value)])
+                .datasets_cache
+                .block_size
+        };
+        assert_eq!(block_size("1MiB"), 1_048_576);
+        assert_eq!(block_size("1048576"), 1_048_576);
+        assert_eq!(block_size("1 MiB"), 1_048_576);
+        assert_eq!(block_size("64kib"), 65_536);
+        let cache = config(&[("BEACON_DATASETS_CACHE_BLOCK_CACHE_SIZE", "512MiB")]).datasets_cache;
+        assert_eq!(cache.block_cache_bytes, 536_870_912);
+    }
+
+    #[test]
+    fn datasets_cache_rejects_decimal_block_size() {
+        let cache = config(&[
+            ("BEACON_DATASETS_CACHE_ENABLED", "true"),
+            ("BEACON_DATASETS_CACHE_BLOCK_SIZE", "1MB"),
+        ])
+        .datasets_cache;
+        let err = validate_datasets_cache(&cache)
+            .expect_err("1MB is no power of two")
+            .to_string();
+        assert!(
+            err.contains("BEACON_DATASETS_CACHE_BLOCK_SIZE"),
+            "got: {err}"
+        );
+        assert!(err.contains("MiB"), "got: {err}");
+    }
+
+    #[test]
+    fn datasets_cache_rejects_unparsable_size() {
+        let err = raw(&[("BEACON_DATASETS_CACHE_BLOCK_SIZE", "lots")])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("BEACON_DATASETS_CACHE_BLOCK_SIZE"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn datasets_cache_rejects_cache_smaller_than_block() {
+        let cache_with = |size| {
+            config(&[
+                ("BEACON_DATASETS_CACHE_ENABLED", "true"),
+                ("BEACON_DATASETS_CACHE_BLOCK_SIZE", "1MiB"),
+                ("BEACON_DATASETS_CACHE_BLOCK_CACHE_SIZE", size),
+            ])
+            .datasets_cache
+        };
+        for size in ["0", "1048575"] {
+            let err = validate_datasets_cache(&cache_with(size))
+                .expect_err("a block cache needs room for one block")
+                .to_string();
+            assert!(
+                err.contains("BEACON_DATASETS_CACHE_BLOCK_CACHE_SIZE"),
+                "got: {err}"
+            );
+        }
+        validate_datasets_cache(&cache_with("1MiB")).expect("one block fits");
+    }
+
+    #[test]
+    fn datasets_cache_rejects_zero_handle_idle() {
+        let cache = config(&[
+            ("BEACON_DATASETS_CACHE_ENABLED", "true"),
+            ("BEACON_DATASETS_CACHE_HANDLE_IDLE_SECS", "0"),
+        ])
+        .datasets_cache;
+        let err = validate_datasets_cache(&cache).expect_err("a handle needs an idle time");
+        assert!(
+            err.to_string()
+                .contains("BEACON_DATASETS_CACHE_HANDLE_IDLE_SECS"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn datasets_cache_rejects_zero_open_files() {
+        let cache = config(&[
+            ("BEACON_DATASETS_CACHE_ENABLED", "true"),
+            ("BEACON_DATASETS_CACHE_MAX_OPEN_FILES", "0"),
+        ])
+        .datasets_cache;
+        let err = validate_datasets_cache(&cache).expect_err("a cache needs one handle");
+        assert!(
+            err.to_string()
+                .contains("BEACON_DATASETS_CACHE_MAX_OPEN_FILES"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn datasets_cache_values_inert_when_off() {
+        let cache = config(&[
+            ("BEACON_DATASETS_CACHE_ENABLED", "false"),
+            ("BEACON_DATASETS_CACHE_BLOCK_SIZE", "1000"),
+        ])
+        .datasets_cache;
+        validate_datasets_cache(&cache).expect("a disabled cache is not checked");
     }
 
     /// The out-of-the-box deployment posture. These defaults decide how a Beacon

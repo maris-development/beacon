@@ -12,6 +12,11 @@ released from a single `v*` tag. Releases before 2.0.0 are recorded in the
 
 ### Added
 
+- **Datasets store cache.** `BEACON_DATASETS_CACHE_ENABLED=true` keeps the files of a local datasets
+  store open between reads, which makes reads from NFS and slow disks faster.
+  `BEACON_DATASETS_CACHE_BLOCK_SIZE` also keeps file blocks in memory. Writes through Beacon show at
+  once, and changes by other programs show after `BEACON_DATASETS_CACHE_REVALIDATE_MS`. The cache is
+  off by default and has no effect on an S3 datasets store.
 - **SQL functions.** `CREATE [OR REPLACE] FUNCTION f(a BIGINT) RETURNS VARCHAR RETURN <expression>`
   makes a function from one scalar expression. Beacon puts the expression in place of each call, so
   filters on it are pushed down. `DROP FUNCTION`, `SHOW CREATE FUNCTION` and
