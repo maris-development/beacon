@@ -1,5 +1,5 @@
 ---
-description: Diagnose a slow Beacon query with EXPLAIN. Then fix it with pushdown, a better file layout, Atlas, a materialized view or a managed table.
+description: Diagnose a slow Beacon query with EXPLAIN. Then fix it with pushdown, a better file layout, a materialized view or a managed table.
 ---
 
 # Speed Up Slow Queries
@@ -55,20 +55,7 @@ interpret runs after the read. It therefore prunes nothing.
 - **Use a cloud-optimized format** for data on object storage. See
   [Query Data on S3](/docs/2.1.0-rc3/guides/query-s3).
 
-## 5. Merge large array collections with Atlas
-
-Do you query a large NetCDF or Zarr collection often? Then convert it to
-[Atlas](/docs/2.1.0-rc3/formats/atlas). This gives the largest gain. Atlas
-keeps statistics for each dataset. Beacon drops the datasets that cannot match a predicate. It drops
-them *before it reads any array data*. It then reads only the arrays that you select.
-
-```sql
-CREATE EXTERNAL TABLE sensor_atlas
-STORED AS ATLAS
-LOCATION 'collections/*/data.atlas';
-```
-
-## 6. Compute once, query many times
+## 5. Compute once, query many times
 
 Does the same expensive aggregate run often? Then compute it once.
 
@@ -92,7 +79,7 @@ CREATE TABLE hot_profiles AS
 SELECT * FROM read_netcdf('argo/**/*.nc') WHERE temperature > 25;
 ```
 
-## 7. Stream instead of collect
+## 6. Stream instead of collect
 
 A query can plan fast but return slowly. The client then holds too much data. Read batches instead
 of the whole result:

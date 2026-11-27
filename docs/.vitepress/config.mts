@@ -4,7 +4,7 @@ import { LATEST_VERSION, LATEST_ENTRY } from './theme/version.js'
 const SITE_URL = 'https://maris-development.github.io/beacon/'
 const OG_IMAGE = SITE_URL + 'hero.png'
 const DESCRIPTION =
-  'Beacon is an open-source query engine for scientific data — query NetCDF, Zarr, Parquet, GeoTIFF, CSV, ODV, Arrow and Atlas files in place over SQL and JSON APIs, on local storage or S3, with no download and no conversion.'
+  'Beacon is an open-source query engine for scientific data — query NetCDF, Zarr, Parquet, GeoTIFF, CSV, ODV and Arrow files in place over SQL and JSON APIs, on local storage or S3, with no download and no conversion.'
 
 // Pages that are written but not released yet. They still build (so the team can
 // review them via their direct URL), but they are kept out of the sidebar, the
@@ -213,7 +213,6 @@ export default defineConfig({
                 { text: 'File statistics', link: '/docs/2.1.0-rc3/internals/file-statistics' },
                 { text: 'NetCDF and HDF5', link: '/docs/2.1.0-rc3/server/performance-tuning#netcdf-and-hdf5-reader' },
                 { text: 'Zarr', link: '/docs/2.1.0-rc3/server/performance-tuning#zarr-predicate-pushdown' },
-                { text: 'Atlas', link: '/docs/2.1.0-rc3/server/performance-tuning#atlas-tuning' },
               ]
             },
             { text: 'Storage internals', link: '/docs/2.1.0-rc3/internals/storage' },
@@ -239,7 +238,6 @@ export default defineConfig({
                 { text: 'NetCDF', link: '/docs/2.1.0-rc3/formats/netcdf' },
                 { text: 'HDF5', link: '/docs/2.1.0-rc3/formats/hdf5' },
                 { text: 'Zarr', link: '/docs/2.1.0-rc3/formats/zarr' },
-                { text: 'Atlas', link: '/docs/2.1.0-rc3/formats/atlas' },
                 { text: 'GeoTIFF / COG', link: '/docs/2.1.0-rc3/formats/geotiff' },
                 { text: 'Delta Lake', link: '/docs/2.1.0-rc3/formats/delta-lake' },
                 { text: 'Apache Iceberg', link: '/docs/2.1.0-rc3/formats/iceberg' },

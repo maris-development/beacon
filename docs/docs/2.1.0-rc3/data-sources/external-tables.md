@@ -103,27 +103,6 @@ STORED AS ZARR
 LOCATION 'sst/*/zarr.json'
 ```
 
-### Atlas
-
-An Atlas table points at the `data.atlas` file itself, not at the folder around it:
-
-```sql
-CREATE EXTERNAL TABLE sensor_atlas
-STORED AS ATLAS
-LOCATION 'collections/sensor/data.atlas'
-```
-
-Use a glob to put several collections in one table:
-
-```sql
-CREATE EXTERNAL TABLE sensor_atlas
-STORED AS ATLAS
-LOCATION 'collections/*/data.atlas'
-```
-
-See [Atlas](/docs/2.1.0-rc3/formats/atlas) for the format details, its `OPTIONS` and its column
-naming. That page also explains how Atlas speeds up NetCDF and Zarr work.
-
 ### CSV
 
 ```sql

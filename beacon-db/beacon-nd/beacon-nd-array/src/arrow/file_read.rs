@@ -364,7 +364,7 @@ impl FileRead {
     ///
     /// Nothing is queued and nothing is streamed, so the file costs one pop and
     /// no I/O. This is what a format returns for a file it ruled out *before*
-    /// opening it — an Atlas dataset whose footer statistics cannot satisfy the
+    /// opening it — a file whose footer statistics cannot satisfy the
     /// predicate, say. That decision belongs to the format, because only the
     /// format knows what it can prove from its own metadata.
     ///
@@ -1239,8 +1239,8 @@ mod tests {
 
     /// A file the scan ruled out before opening reads as nothing.
     ///
-    /// The format decides this from its own metadata — Atlas from the
-    /// statistics in a collection footer — so nothing here can check the
+    /// The format decides this from its own metadata — from the
+    /// statistics in a file footer, say — so nothing here can check the
     /// decision. What this pins is the shape of the answer: no work queued, no
     /// batch emitted, and a clean stream rather than an error.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

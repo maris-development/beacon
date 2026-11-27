@@ -1,5 +1,5 @@
 ---
-description: Read external files with SQL. Every supported format has a read_* table function, from Parquet and CSV to NetCDF, Zarr, Atlas and GeoTIFF.
+description: Read external files with SQL. Every supported format has a read_* table function, from Parquet and CSV to NetCDF, Zarr and GeoTIFF.
 ---
 
 # External Files
@@ -33,7 +33,6 @@ S3-compatible bucket, chosen at startup. See
 | [NetCDF](/docs/2.1.0-rc3/formats/netcdf) | `read_netcdf` | `NC` | `.nc`, `.nc3`, `.nc4`, `.netcdf` |
 | [HDF5](/docs/2.1.0-rc3/formats/hdf5) | `read_hdf5` | `HDF5`, `H5` | `.h5`, `.hdf5` |
 | [Zarr](/docs/2.1.0-rc3/formats/zarr) | `read_zarr` | `ZARR` | `zarr.json` marker |
-| [Atlas](/docs/2.1.0-rc3/formats/atlas) | `read_atlas` | `ATLAS` | `data.atlas` file |
 | [GeoTIFF / COG](/docs/2.1.0-rc3/formats/geotiff) | `read_tiff` | `TIFF` | `.tif`, `.tiff` |
 | [Delta Lake](/docs/2.1.0-rc3/formats/delta-lake) | `read_delta` | `DELTA` | `_delta_log/` directory |
 | [Apache Iceberg](/docs/2.1.0-rc3/formats/iceberg) | `read_iceberg` | `ICEBERG` | `metadata/` directory |
@@ -57,7 +56,6 @@ The table above says how to read each format. This one says what you get.
 | NetCDF | Full | Projection + dimension selection | Yes | `read_netcdf_schema` | Yes |
 | HDF5 | Full | Projection + dimension selection | Yes | `read_hdf5_schema` | Yes |
 | Zarr | Full | Projection + dimension selection, chunk pruning | No | `read_zarr_schema` | Yes |
-| Atlas | Full | Predicate + projection, **dataset-level pruning** | Yes | `read_atlas_schema` | Yes |
 | GeoTIFF / COG | Full | Projection, range requests | No | `read_tiff_schema` | Yes |
 | Delta Lake | Full | Predicate + projection, file skipping | No, but see below | `read_delta_schema` | No |
 | Apache Iceberg | Full | Predicate + projection, file skipping | No | `read_iceberg_schema` | No |
@@ -72,8 +70,6 @@ Reading the columns:
   query — paths in SQL are relative either way.
 - **Pushdown** — how much of a query reaches storage instead of running after the read. *Predicate*
   means a `WHERE` clause prunes data. *Projection* means a narrow `SELECT` reads fewer columns.
-  [Atlas](/docs/2.1.0-rc3/formats/atlas) is the strongest: the statistics in a collection's footer
-  drop whole datasets before any array is opened.
 - **Query output** — whether a query result can be written back in that format, with `COPY TO` or
   an `output.format` on the API. Writing rows into an existing table is a different capability:
   **Delta Lake** external tables accept `INSERT INTO`, and
@@ -116,8 +112,7 @@ GROUP BY platform;
 ```
 
 [Zarr](/docs/2.1.0-rc3/formats/zarr) is a directory behind a marker file: point at `zarr.json`,
-not at the chunk files. An [Atlas](/docs/2.1.0-rc3/formats/atlas) collection is a single file:
-point at `data.atlas`.
+not at the chunk files.
 
 Some files share a schema but have different columns. Combine those files with
 [`UNION BY NAME`](/docs/2.1.0-rc3/sql/union-by-name).

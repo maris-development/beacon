@@ -107,10 +107,6 @@ Limitations:
 :::tip
 Predicate pushdown is automatic. Beacon prunes chunks and slices the coordinate dimensions such as
 `time`, `latitude` and `longitude`. It uses the filters of your query. You configure nothing.
-
-Do you query a collection often? Then convert the Zarr stores into one
-[Atlas](/docs/2.1.0-rc3/formats/atlas) collection. Atlas is an array store
-with statistics. Beacon can drop whole datasets before it reads a chunk.
 :::
 
 ## CF decode

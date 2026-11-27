@@ -46,7 +46,6 @@ CREATE EXTERNAL TABLE cruises STORED AS NC LOCATION 'cruises/**/*.nc'
 | `NC` | `.nc` | [NetCDF](/docs/2.1.0-rc3/formats/netcdf) |
 | `HDF5`, `H5` | `.h5`, `.hdf5` | [HDF5](/docs/2.1.0-rc3/formats/hdf5) |
 | `ZARR` | Zarr v3 (`zarr.json`) | [Zarr](/docs/2.1.0-rc3/formats/zarr) |
-| `ATLAS` | Atlas collection (`data.atlas`) | [Atlas](/docs/2.1.0-rc3/formats/atlas) |
 | `CSV` | `.csv`, `.tsv` | [CSV](/docs/2.1.0-rc3/formats/csv) |
 | `ARROW` | Arrow IPC (`.arrow`, `.feather`) | [Arrow IPC](/docs/2.1.0-rc3/formats/arrow) |
 | `TIFF` | GeoTIFF / Cloud-Optimized GeoTIFF | [GeoTIFF](/docs/2.1.0-rc3/formats/geotiff) |
@@ -69,13 +68,10 @@ federate a table in an external SQL database. See
 [SQL Databases](/docs/2.1.0-rc3/data-sources/sql-databases). Their `LOCATION` is the remote
 table name. The connection details go in `OPTIONS`, with an encrypted `password`.
 
-A Zarr table must point at a `zarr.json` entry file. An Atlas collection is a single file, so an
-Atlas table points at that file:
+A Zarr table must point at a `zarr.json` entry file:
 
 ```sql
 CREATE EXTERNAL TABLE sst STORED AS ZARR LOCATION 'sst/*/zarr.json'
-
-CREATE EXTERNAL TABLE sensor STORED AS ATLAS LOCATION 'sensor/data.atlas'
 ```
 
 `GEOPARQUET` reads Parquet files. Beacon decodes their geometry columns to native GeoArrow. See
@@ -247,7 +243,6 @@ more cores. Set it for a table with many files. The merged schema does not chang
 | `NC` | `read_dimensions`, `skip_unbroadcastable`, `skip_invalid_files`, `enable_statistics` | [NetCDF](/docs/2.1.0-rc3/formats/netcdf#options) |
 | `HDF5`, `H5` | `read_dimensions`, `enable_statistics`, `unify_phony_dimensions`, `convention` | [HDF5](/docs/2.1.0-rc3/formats/hdf5#options) |
 | `ZARR` | `read_dimensions`, `enable_statistics` | [Zarr](/docs/2.1.0-rc3/formats/zarr#options) |
-| `ATLAS` | `read_dimensions` | [Atlas](/docs/2.1.0-rc3/formats/atlas#options) |
 | `CSV` | `delimiter`, `infer_records` | [CSV](/docs/2.1.0-rc3/formats/csv#options) |
 | `DELTA` | `version`, `timestamp` | [Delta Lake](/docs/2.1.0-rc3/formats/delta-lake#options) |
 | `ICEBERG` | `snapshot_id` | [Apache Iceberg](/docs/2.1.0-rc3/formats/iceberg#options) |

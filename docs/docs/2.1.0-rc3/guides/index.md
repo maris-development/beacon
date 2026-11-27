@@ -12,7 +12,7 @@ the reference chapters.
 | [Query a File Collection](/docs/2.1.0-rc3/guides/query-a-collection) | Make one table from thousands of NetCDF or Parquet files |
 | [Query Data on S3](/docs/2.1.0-rc3/guides/query-s3) | Credentials, public buckets, and fast object storage |
 | [Export Query Results](/docs/2.1.0-rc3/guides/export-results) | Write results to Parquet, CSV, NetCDF, GeoParquet or ODV |
-| [Speed Up Slow Queries](/docs/2.1.0-rc3/guides/speed-up-queries) | Diagnose with `EXPLAIN`. Then fix with pushdown, Atlas or a materialized view |
+| [Speed Up Slow Queries](/docs/2.1.0-rc3/guides/speed-up-queries) | Diagnose with `EXPLAIN`. Then fix with pushdown, the file layout or a materialized view |
 | [Write a Plugin](/docs/2.1.0-rc3/guides/write-a-plugin) | Add functions, file formats or table types. Then pack, test and release the plugin |
 
 New to Beacon? Start with the [Quick Start](/docs/2.1.0-rc3/quickstart). Then read

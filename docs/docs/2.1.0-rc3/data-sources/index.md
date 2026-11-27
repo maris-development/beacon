@@ -38,10 +38,9 @@ SELECT * FROM read_csv(['a.csv', 'b.csv']);
 ```
 
 A glob (`*`, `**`) expands across directories. One query can therefore cover thousands of files.
-Beacon merges their schemas. It also prunes the files that cannot match your filters. Array formats
-such as [Zarr](/docs/2.1.0-rc3/formats/zarr) and
-[Atlas](/docs/2.1.0-rc3/formats/atlas) are not plain files. Point at Zarr's `zarr.json` marker,
-and at the `data.atlas` file of an Atlas collection, not at the chunks.
+Beacon merges their schemas. It also prunes the files that cannot match your filters. An array
+format such as [Zarr](/docs/2.1.0-rc3/formats/zarr) is not a plain file. Point at Zarr's
+`zarr.json` marker, not at the chunks.
 
 Each format has its own chapter. The chapter covers the read behaviour, the attribute columns and
 the limitations. See [File Formats](/docs/2.1.0-rc3/formats/) for the full

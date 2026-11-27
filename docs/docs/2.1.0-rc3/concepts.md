@@ -20,7 +20,7 @@ Beacon needs no load step. The **reader table functions** open your existing fil
 tables at query time. The files can be local or on S3. The functions include
 [`read_parquet`](/docs/2.1.0-rc3/sql/table-functions), `read_netcdf`, `read_zarr`,
 `read_csv` and `read_hdf5`. Supported formats include NetCDF, Zarr, Parquet, GeoParquet, CSV, ODV
-ASCII, GeoTIFF, Atlas, Arrow IPC and Delta Lake. See
+ASCII, GeoTIFF, Arrow IPC and Delta Lake. See
 [Supported formats](/docs/2.1.0-rc3/server/datasets).
 
 ```sql

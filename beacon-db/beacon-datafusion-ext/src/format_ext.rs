@@ -125,7 +125,7 @@ pub trait FileFormatFactoryExt: FileFormatFactory + Send + Sync {
     /// one depends on.
     ///
     /// The default is one unit per object, each depending on itself, which suits
-    /// every format that reads a file. Zarr and Atlas override it: they derive
+    /// every format that reads a file. Zarr overrides it: it derives
     /// one schema per *store*, from a marker at its root, and the rest of the
     /// listing is that store's contents. [`units_over_stores`] builds that.
     fn schema_units(&self, objects: &[ObjectMeta]) -> Vec<SchemaUnit> {
@@ -143,7 +143,7 @@ pub struct SchemaUnit {
     /// The object this schema is keyed on: the file, or a store's marker.
     pub source: usize,
     /// Every *other* object the schema depends on. Empty for a format that
-    /// reads a file, which is all of them but Zarr and Atlas.
+    /// reads a file, which is all of them but Zarr.
     ///
     /// These decide when a cached entry stops being valid. A Zarr store's
     /// schema comes from arrays under its marker, so a changed chunk has to
@@ -164,7 +164,7 @@ impl SchemaUnit {
 /// Units for a format whose schema comes from a marker at a store's root.
 ///
 /// `markers` are the objects the format will actually infer from — Zarr's
-/// top-level `zarr.json` files, Atlas's markers. Each unit depends on every
+/// top-level `zarr.json` files. Each unit depends on every
 /// listed object under the marker's directory, so a change anywhere in a store
 /// invalidates that store's cached schema.
 ///
@@ -473,7 +473,7 @@ mod schema_cache_tests {
     }
 
     /// The default is one unit per object, depending on nothing else. That is
-    /// every format but Zarr and Atlas.
+    /// every format but Zarr.
     #[test]
     fn the_default_unit_is_one_file() {
         let unit = SchemaUnit::from_file(3);

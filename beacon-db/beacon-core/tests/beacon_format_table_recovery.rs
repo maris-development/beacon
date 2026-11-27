@@ -3,7 +3,7 @@
 //!
 //! An external table's persisted definition names its format (`STORED AS ZARR`),
 //! resolved at recovery through `SessionState::get_file_format_factory`. Beacon
-//! registers its formats — NetCDF, Atlas, Zarr, GeoTIFF, GeoParquet, HDF5 —
+//! registers its formats — NetCDF, Zarr, GeoTIFF, GeoParquet, HDF5 —
 //! on the session; DataFusion ships CSV/Parquet/Arrow/JSON. If recovery runs before
 //! beacon's registration, a table in a beacon format fails to rebuild with
 //! "Could not find FileFormat" and is *skipped*, so it silently disappears from the
@@ -130,4 +130,24 @@ async fn bbf_is_not_a_file_format() {
         .to_string();
     assert!(err.contains("Could not find FileFormat"), "{err}");
     assert!(rt.try_sql("SELECT * FROM read_bbf('x.bbf')").await.is_err());
+}
+
+/// Atlas is not a built-in format; a plugin provides it.
+#[tokio::test(flavor = "multi_thread")]
+async fn atlas_is_not_a_file_format() {
+    let rt = common::runtime("atlas-removed").await;
+    let err = rt
+        .try_sql("CREATE EXTERNAL TABLE f_atlas STORED AS ATLAS LOCATION 'missing/data.atlas'")
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("Could not find FileFormat"), "{err}");
+    assert!(rt
+        .try_sql("SELECT v FROM read_atlas(['x/data.atlas'])")
+        .await
+        .is_err());
+    assert!(rt
+        .try_sql("SELECT * FROM read_atlas_schema(['x/data.atlas'])")
+        .await
+        .is_err());
 }

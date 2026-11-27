@@ -157,7 +157,6 @@ See [External Tables](/docs/2.1.0-rc3/data-sources/external-tables).
 
 ## 6. If it is slow
 
-Do you scan thousands of NetCDF or Zarr files often? Then merge them into one
-[Atlas](/docs/2.1.0-rc3/formats/atlas) collection. Atlas drops whole datasets
-with its stored statistics. See
+Do you scan thousands of NetCDF or Zarr files often? Then copy the subset that you need into a
+managed table, or compute the aggregate once in a materialized view. See
 [Speed Up Slow Queries](/docs/2.1.0-rc3/guides/speed-up-queries).

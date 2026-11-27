@@ -16,8 +16,8 @@ a materialized view for an expensive, repeated or aggregate query.
 
 The query can read any source that Beacon knows. Sources include registered tables,
 [external tables](/docs/2.1.0-rc3/data-sources/external-tables),
-[views](/docs/2.1.0-rc3/sql/create-view) and table functions such as `read_netcdf()`,
-`read_zarr()` and `read_atlas()`.
+[views](/docs/2.1.0-rc3/sql/create-view) and table functions such as `read_netcdf()` and
+`read_zarr()`.
 
 A regular [view](/docs/2.1.0-rc3/sql/create-view) runs its query on every reference. A
 materialized view changes only when you run [`REFRESH`](#refresh).

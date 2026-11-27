@@ -101,8 +101,7 @@ The remote server runs its own scan. It then streams the result back. See
 ## Performance notes
 
 - **Cloud-optimized formats are faster.** Parquet,
-  [Zarr](/docs/2.1.0-rc3/formats/zarr),
-  [Atlas](/docs/2.1.0-rc3/formats/atlas) and Cloud-Optimized GeoTIFF support
+  [Zarr](/docs/2.1.0-rc3/formats/zarr) and Cloud-Optimized GeoTIFF support
   range requests. Beacon fetches only the chunks that a query needs.
 - **NetCDF and HDF5 read byte ranges.** The reader fetches byte ranges through the object store,
   so a private bucket works and Beacon makes no local copy. See

@@ -200,16 +200,6 @@ LIMIT 0;
 The Zarr reader follows the NetCDF rules, with two differences. A packed column is `Float64`. An
 integer variable with `nanoseconds since` units is `Timestamp(ns)`. See [CF decode](/docs/2.1.0-rc3/formats/zarr#cf-decode) on the Zarr page for the full list.
 
-## Atlas
-
-Atlas decodes nothing, and needs to. Its own types include a nanosecond timestamp, and the ingest
-path applies the conventions before the write: `atlas create` reads each NetCDF file with xarray,
-which applies `scale_factor`, `add_offset` and the CF time units. A collection therefore holds
-decoded values already, and Beacon reads its arrays exactly as they are stored.
-
-A `units` or `scale_factor` attribute can stay on an array, from the source file. It is a column
-like any other attribute, for example `"temperature.units"`. It changes no value.
-
 ## Next
 
 - [Arrays to tables](/docs/2.1.0-rc3/arrays-to-tables): the row count and the grid rule

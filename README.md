@@ -54,7 +54,7 @@ when you restart or replace the container. Without the mount, a new container st
 
 Copy files into `./datasets`. Beacon finds them. You register nothing first.
 
-Beacon reads Parquet, GeoParquet, NetCDF, HDF5, Zarr, Icechunk, Atlas, CSV, Arrow IPC, GeoTIFF,
+Beacon reads Parquet, GeoParquet, NetCDF, HDF5, Zarr, Icechunk, CSV, Arrow IPC, GeoTIFF,
 Delta Lake, Apache Iceberg and ODV ASCII.
 
 A path in a query is relative to the datasets root. A file at `./datasets/obs/a.parquet` is

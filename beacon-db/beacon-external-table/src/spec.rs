@@ -97,7 +97,7 @@ impl ExternalTableSpec {
 
     /// Infers the file schema from the current files and merges it with `type_widening`.
     ///
-    /// The format infers one schema per unit: a file, or for Zarr and Atlas a
+    /// The format infers one schema per unit: a file, or for Zarr a
     /// store marker. The merge takes the units in path order, so an order
     /// dependent strategy gives the same schema on each build.
     ///
@@ -552,7 +552,7 @@ mod tests {
 
     #[test]
     fn fallback_file_glob_is_recursive_and_lowercased() {
-        assert_eq!(fallback_file_glob("ATLAS"), "**/*.atlas");
+        assert_eq!(fallback_file_glob("NC"), "**/*.nc");
         assert_eq!(fallback_file_glob("ParQuet"), "**/*.parquet");
     }
 }
