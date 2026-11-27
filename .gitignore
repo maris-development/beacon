@@ -20,6 +20,8 @@ data/
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
 data/
+# The committed Iceberg fixture keeps its data files in a data/ folder.
+!test-datasets/iceberg-example/data/
 
 node_modules/
 .node_modules/
