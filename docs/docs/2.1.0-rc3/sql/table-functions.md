@@ -108,30 +108,6 @@ FROM read_zarr('sst/*/zarr.json')
 LIMIT 1
 ```
 
-## `read_atlas`
-
-```text
-read_atlas(glob_paths)
-read_atlas(glob_paths, dimensions)
-```
-
-Beacon reads the [Atlas](/docs/2.1.0-rc3/formats/atlas) collections that match one or more glob
-patterns. A collection is one file, `data.atlas`, so a path names that file. Give an exact path or
-a glob such as `**/data.atlas`.
-
-The optional `dimensions` argument keeps the arrays whose dimensions are all in the list. Every
-array of a collection records its own minimum and maximum, so a range query judges every dataset
-in one pass and reads only the ones that can match.
-
-```sql
-SELECT * FROM read_atlas('collections/sensor/data.atlas')
-
--- Combine every collection under a prefix, keeping a subset of dimensions
-SELECT time, temperature
-FROM read_atlas(['collections/**/data.atlas'], ['time', 'latitude', 'longitude'])
-WHERE time >= '2024-01-01'
-```
-
 ## `read_parquet`
 
 ```text

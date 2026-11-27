@@ -51,8 +51,7 @@ configuration. A server has one store. It selects that store at startup.
 Object storage has a high latency. Fetch as few bytes as possible:
 
 - **Use cloud-optimized formats.** Parquet,
-  [Zarr](/docs/2.1.0-rc3/formats/zarr),
-  [Atlas](/docs/2.1.0-rc3/formats/atlas) and Cloud-Optimized GeoTIFF support
+  [Zarr](/docs/2.1.0-rc3/formats/zarr) and Cloud-Optimized GeoTIFF support
   range requests. Beacon then fetches only the chunks that it needs.
 - **Select only the columns that you need.** Projection pushdown turns a narrow `SELECT` into fewer
   bytes.

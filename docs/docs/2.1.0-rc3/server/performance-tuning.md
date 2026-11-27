@@ -246,24 +246,6 @@ Content-Type: application/json
 ```
 
 ::: tip
-Do you query a collection often? Then convert the Zarr stores into one
-[Atlas](/docs/2.1.0-rc3/formats/atlas) collection. Atlas adds dataset pruning
-with statistics, next to the chunk pruning. It drops whole datasets before it reads a chunk.
+Do you query a collection often? Then compute the result once in a
+[materialized view](/docs/2.1.0-rc3/sql/create-materialized-view).
 :::
-
-## Atlas Tuning
-
-Beacon opens an [Atlas](/docs/2.1.0-rc3/formats/atlas) collection by reading the footer of its
-`data.atlas` file. Each table keeps its open collections in a cache of 512 entries, so a query
-does not read that footer again. Each cached collection holds its own block cache, 256 MiB of
-decompressed blocks and 64 MiB of raw slabs, so the cache is a memory bound as much as a handle
-count. There is no setting for it.
-
-### Dataset pruning
-
-Pruning is always on. A query with a predicate judges every dataset of a collection against the
-statistics in its footer, in one pass, and never opens the ones that cannot match. Pruning never
-changes an answer, and the filter above the scan still decides every row.
-
-`EXPLAIN ANALYZE` reports what it did as `atlas_datasets_pruned` and `atlas_datasets_scanned`, with
-the time spent as `atlas_open_time` and `atlas_prune_time`.

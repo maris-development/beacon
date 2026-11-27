@@ -84,10 +84,9 @@ Limitations:
 - Beacon reads a file in object storage with the credentials of the server.
 
 :::tip
-For a large NetCDF collection, convert the files into one
-[Atlas](/docs/2.1.0-rc3/formats/atlas) collection. Atlas merges many NetCDF
-files into one array store with statistics. Beacon can then drop whole datasets and read only the
-arrays that you select. This is much faster than a scan of the original NetCDF files.
+Do you query a large NetCDF collection often? Then compute the result once in a
+[materialized view](/docs/2.1.0-rc3/sql/create-materialized-view). A query on the view does not
+scan the original NetCDF files.
 :::
 
 ## CF decode

@@ -87,8 +87,7 @@ The first leg costs nothing. Only the answer leaves the cloud. An answer is much
 files that hold it. Three effects combine:
 
 1. **Beacon drops whole files.** A filter on time or depth removes a file before Beacon reads its
-   data. Beacon uses the statistics in an [Atlas](/docs/2.0.2/formats/atlas) collection, or the
-   row group statistics in a Parquet file.
+   data. Beacon uses the row group statistics in a Parquet file.
 2. **Beacon reads only the columns you name.** `SELECT time, temp` reads two columns from a columnar
    file. It does not read the other 198.
 3. **Beacon filters the rows.** It sends only the rows that match.
@@ -110,7 +109,7 @@ You save money only when all four conditions are true:
   nothing for that user.
 - **You count the compute cost.** You exchange an egress bill for a server that runs all the time.
   A small archive costs more this way. A large archive costs less.
-- **The format supports pushdown.** Parquet, Atlas, Delta and Zarr drop data early. A CSV file
+- **The format supports pushdown.** Parquet, Delta and Zarr drop data early. A CSV file
   cannot. Beacon reads a CSV file from start to end. See the
   [capability matrix](/docs/2.0.2/formats/#capability-matrix).
 
@@ -175,7 +174,7 @@ Four differences then matter.
 
 #### 1. Format
 
-DuckDB has no native reader for NetCDF, Zarr, ODV, HDF5, GeoTIFF or Atlas. Most ocean and climate
+DuckDB has no native reader for NetCDF, Zarr, ODV, HDF5 or GeoTIFF. Most ocean and climate
 archives use those formats. To query them with DuckDB, convert them to Parquet first. That
 conversion is the step you wanted to avoid. It also makes a second copy.
 

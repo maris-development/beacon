@@ -186,6 +186,9 @@ released from a single `v*` tag. Releases before 2.0.0 are recorded in the
 - **BBF.** `STORED AS BBF`, `read_bbf`, `read_bbf_schema`, the JSON `bbf` source and `fromBbf` in
   the TypeScript client are gone. A stored BBF table is skipped at startup, with an error in the
   log. Convert BBF data to a different format with an earlier release before the upgrade.
+- **Built-in Atlas reader.** Atlas moves to a plugin. `STORED AS ATLAS`, `read_atlas` and
+  `read_atlas_schema` need the Atlas plugin. At startup the server skips a saved Atlas table and
+  logs an error; install the plugin and restart, and the table loads again.
 
 ## [2.0.2] — 2026-10-13
 

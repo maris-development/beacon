@@ -25,7 +25,7 @@ Beacon copies nothing.
 
 ### Which formats are supported?
 
-Parquet, GeoParquet, CSV, TSV, Arrow IPC, NetCDF, HDF5, Zarr, Icechunk, Atlas, GeoTIFF, COG,
+Parquet, GeoParquet, CSV, TSV, Arrow IPC, NetCDF, HDF5, Zarr, Icechunk, GeoTIFF, COG,
 Delta Lake, Apache Iceberg and ODV ASCII. Each format has its own chapter in
 [File Formats](/docs/2.1.0-rc3/formats/).
 
@@ -151,8 +151,8 @@ Run `EXPLAIN` first. It shows if your filter and column list reach the scan. A p
 scan prunes nothing.
 
 The usual fixes come in this order of impact. Select fewer columns. Filter on coordinate columns. Do
-not put a predicate inside a function that the reader cannot interpret. Merge large NetCDF or Zarr
-collections into [Atlas](/docs/2.1.0-rc3/formats/atlas). See
+not put a predicate inside a function that the reader cannot interpret. Compute an expensive
+aggregate once in a materialized view. See
 [Speed Up Slow Queries](/docs/2.1.0-rc3/guides/speed-up-queries) for the full detail.
 
 ### My spatial filter on GeoParquet prunes nothing
