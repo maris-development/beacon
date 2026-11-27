@@ -33,7 +33,7 @@ SELECT * FROM read_netcdf_schema('argo/2024/01/*.nc');
 | column_name | data_type | nullable |
 |---|---|---|
 | PLATFORM_NUMBER | Utf8 | true |
-| JULD | Timestamp(Nanosecond) | true |
+| JULD | Timestamp(Microsecond) | true |
 | LATITUDE | Float64 | true |
 | LONGITUDE | Float64 | true |
 | PRES | Float64 | true |
@@ -107,7 +107,7 @@ engine skip data.
 Pass a list to combine different locations in one query:
 
 ```sql
-SELECT * FROM read_netcdf(['argo/**/*.nc', 'wod/**/*.nc']);
+SELECT * FROM read_netcdf(['argo/**/*.nc', 'ctd/**/*.nc']);
 ```
 
 ## 3. Handle schema differences

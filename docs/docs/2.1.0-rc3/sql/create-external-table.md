@@ -118,18 +118,10 @@ PARTITIONED BY (year, month)
 SELECT * FROM observations WHERE year = 2024 AND month = 6
 ```
 
-The value comes from the directory name of each file. `NC`, `HDF5` and `TIFF` read a partitioned
-collection the same way:
+The value comes from the directory name of each file.
 
-```sql
-CREATE EXTERNAL TABLE observations
-STORED AS NC
-LOCATION 'obs/'
-PARTITIONED BY (year, month)
-```
-
-`ZARR` does not support this clause. A Zarr table holds groups inside one store, not files in
-directories, so a path holds no partition value.
+`NC`, `HDF5`, `TIFF` and `ZARR` do not support this clause. A query on such a table gives an error. A Zarr table
+holds groups inside one store, not files in directories, so a path holds no partition value.
 
 ## `OPTIONS`
 

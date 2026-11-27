@@ -109,7 +109,7 @@ impl TableFunctionImpl for ReadZarrFunc {
         )?
         .unwrap_or(false);
 
-        // Predicate pushdown is handled automatically by the shared engine, so
+        // Predicate pushdown is handled automatically by the ND scan, so
         // no manual statistics/column selection is needed.
         let read_dimensions = (!dimensions.is_empty()).then_some(dimensions);
         let file_format =

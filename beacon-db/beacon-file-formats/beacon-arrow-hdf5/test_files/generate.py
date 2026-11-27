@@ -51,6 +51,36 @@ def nested_groups() -> None:
         )
 
 
+def list_attribute() -> None:
+    """A file with one attribute of two values and one of one value."""
+    with h5py.File(os.path.join(HERE, "list-attribute.h5"), "w") as f:
+        f.attrs["bounds"] = np.array([1.0, 2.0])
+        f.attrs["version"] = np.int64(1)
+        f.create_dataset("value", data=np.array([1, 2, 3], dtype=np.int32))
+
+
+def short_compound() -> None:
+    """A compound dataset on a dimension `x` that another group makes longer.
+
+    The root `x` holds 5 values and the `x` of group `g` holds 3. The compound
+    in `g` stores 3 records, so a read of the 5-long `x` pads it.
+    """
+    with h5py.File(os.path.join(HERE, "short-compound.h5"), "w") as f:
+        x = f.create_dataset("x", data=np.arange(5, dtype=np.int32))
+        x.make_scale("x")
+        value = f.create_dataset("value", data=np.arange(5, dtype=np.float64))
+        value.dims[0].attach_scale(x)
+
+        g = f.create_group("g")
+        gx = g.create_dataset("x", data=np.arange(3, dtype=np.int32))
+        gx.make_scale("x")
+        records = np.array(
+            [(1, 1.5), (2, 2.5), (3, 3.5)], dtype=[("a", "i4"), ("b", "f8")]
+        )
+        rec = g.create_dataset("rec", data=records)
+        rec.dims[0].attach_scale(gx)
+
+
 def compound() -> None:
     """A file holding one compound dataset.
 
@@ -151,6 +181,16 @@ def instrument() -> None:
 
 
 def optodas() -> None:
+    """The OptoDAS miniature with no gap."""
+    optodas_file("optodas.h5", missing=[])
+
+
+def optodas_gap() -> None:
+    """The OptoDAS miniature that reports one missing sample."""
+    optodas_file("optodas-gap.h5", missing=[3])
+
+
+def optodas_file(name: str, missing: list) -> None:
     """A miniature of an ASN OptoDAS acquisition file.
 
     This is `instrument.h5` plus the metadata that layout records about itself:
@@ -161,7 +201,7 @@ def optodas() -> None:
     hand: 6 samples at 125 Hz from 2026-03-28T12:00:00Z, and 4 channels 4 raw
     channels apart, each 1.25 m wide.
     """
-    with h5py.File(os.path.join(HERE, "optodas.h5"), "w") as f:
+    with h5py.File(os.path.join(HERE, name), "w") as f:
         # int16 counts, 6 samples of 4 channels.
         f.create_dataset("data", data=np.arange(24, dtype=np.int16).reshape(6, 4))
         f.create_dataset("fileVersion", data=np.int32(3))
@@ -181,9 +221,11 @@ def optodas() -> None:
         header.create_dataset(
             "channels", data=np.array([0, 4, 8, 12], dtype=np.int32)
         )
-        # An acquisition with no gap. A file that reports one gets no clock.
+        # A file that reports a gap gets no clock.
         header.create_dataset(
-            "missingSamples", shape=(0,), maxshape=(None,), dtype=np.int32
+            "missingSamples",
+            data=np.array(missing, dtype=np.int32),
+            maxshape=(None,),
         )
 
         ranges = header.create_group("dimensionRanges")
@@ -219,4 +261,10 @@ if __name__ == "__main__":
     compound()
     instrument()
     optodas()
-    print("wrote nested-groups.h5, compound.h5, instrument.h5 and optodas.h5")
+    optodas_gap()
+    list_attribute()
+    short_compound()
+    print(
+        "wrote nested-groups.h5, compound.h5, instrument.h5, optodas.h5, "
+        "optodas-gap.h5, list-attribute.h5 and short-compound.h5"
+    )

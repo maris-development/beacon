@@ -81,6 +81,96 @@ address form. Every listing and every read on object storage costs network laten
 - Are the listings slow? Then use a [crawler](/docs/2.1.0-rc3/server/crawlers). It keeps the
   catalog current in the background. Beacon then does not scan at query time.
 
+## Datasets on NFS or slow disks
+
+Without the cache, Beacon opens a dataset file again for each read. A query on a NetCDF or Zarr
+collection reads many small ranges, so it opens each file many times. On NFS, each open costs
+network round trips. On a hard disk (HDD), each small read costs a seek.
+
+The datasets store cache removes most of this cost. It has two parts:
+
+- **The handle cache** keeps files open between reads. Beacon then opens a file once for many reads.
+- **The block cache** keeps aligned blocks of file data in memory. It is off by default.
+
+[Datasets store cache](/docs/2.1.0-rc3/server/configuration#datasets-store-cache) gives the six
+settings and their defaults.
+
+### When to turn the cache on
+
+- Turn the cache on when the datasets folder is on NFS or on an HDD.
+- On a local SSD or NVMe disk, the handle cache helps a little. Keep the block cache off there.
+
+To turn on the handle cache, set `BEACON_DATASETS_CACHE_ENABLED=true`. In tests, reads with the
+handle cache were never slower than reads without the cache.
+
+### Block size
+
+The block cache reads more data than a query asks for. This helps when a seek or a round trip
+costs more than the extra bytes. It makes reads slower when the network bandwidth is the limit.
+The best block size depends on the storage. Start from this table, and measure with your own
+queries:
+
+| Storage behind the datasets folder | `BEACON_DATASETS_CACHE_BLOCK_SIZE` |
+| --- | --- |
+| Local SSD or NVMe | `0` (off) |
+| NFS on SSD, 1 Gbit | `0`, or `64KiB` for a collection of small files |
+| NFS on SSD, 10 Gbit | `256KiB` |
+| HDD, local or NFS | `1MiB` |
+| High latency (WAN, cloud NFS) | `512KiB` to `1MiB` |
+
+Use binary units such as `KiB` and `MiB`. `MB` means 1000000 bytes, and this value is not a
+power of two.
+
+`BEACON_DATASETS_CACHE_BLOCK_CACHE_SIZE` sets the memory limit of the block cache. Add this value
+to the memory that you give to Beacon.
+
+Beacon keeps the cached blocks of a file only while the file handle stays in the cache. A handle
+closes when the handle cache is full, or after `BEACON_DATASETS_CACHE_HANDLE_IDLE_SECS` without a
+read. Beacon does not use the blocks of a closed handle again. With the block cache on, set
+`BEACON_DATASETS_CACHE_MAX_OPEN_FILES` above the number of files that your queries read together.
+
+### When Beacon sees a changed file
+
+- A write through Beacon shows at once. Examples are a file upload and a file delete in the admin API.
+- A change by another program shows after at most `BEACON_DATASETS_CACHE_REVALIDATE_MS`, plus the
+  attribute cache time of the NFS client.
+- A change also shows at the next listing of the file, when the listing gives a new size or a new
+  modification time.
+
+Beacon compares only the size and the modification time of a file. Some tools change a file but
+keep both values. Examples are `rsync -t`, `cp -p`, and `touch -d` on a file with the same size.
+
+::: warning A change that keeps the size and the modification time
+Beacon does not see such a change. It reads the old data until the file handle leaves the cache.
+A handle leaves the cache after `BEACON_DATASETS_CACHE_HANDLE_IDLE_SECS` without a read, or when
+the cache is full. A file that Beacon reads without a pause keeps its handle. To make Beacon see the
+change, do one of these steps:
+
+- Restart Beacon.
+- Change the size or the modification time of the file.
+- Write the file through Beacon. A file upload or a file delete removes the handle from the cache.
+:::
+
+### File descriptor limit
+
+Each cached handle holds one open file descriptor. Keep `BEACON_DATASETS_CACHE_MAX_OPEN_FILES` well
+below the file limit of the process (`ulimit -n`). Beacon also needs file descriptors for network
+connections, logs and the tables store.
+
+`BEACON_DATASETS_CACHE_MAX_OPEN_FILES` is a target, not a hard limit. The cache can hold more
+handles for a short time. It closes the extra handles at its next maintenance run, after 5 seconds
+at most. A file that a query still reads also stays open after the cache drops its handle. Keep a
+margin for these handles.
+
+With the block cache on, a low `BEACON_DATASETS_CACHE_MAX_OPEN_FILES` also lowers the block cache
+hits. See [Block size](#block-size).
+
+### Hidden `.nfs` files
+
+NFS renames a deleted file to `.nfs...` while a process holds the file open. The handle cache can
+keep such a file open for a short time. While the cache is on, Beacon hides every file whose name
+starts with `.nfs` from the listings. A query therefore does not read such a file as data.
+
 ## File statistics
 
 File statistics record the lowest and the highest value of each column in each file. A query with a

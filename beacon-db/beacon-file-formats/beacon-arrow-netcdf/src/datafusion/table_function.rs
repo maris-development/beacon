@@ -9,7 +9,6 @@ use datafusion::{catalog::TableFunctionImpl, common::plan_err, prelude::SessionC
 use beacon_common::table_function::BeaconTableFunctionImpl;
 
 /// Format identity the NetCDF factory is registered under (its `get_ext`).
-const NETCDF_FORMAT: &str = "nc";
 
 pub struct ReadNetCDFFunc {
     // Session Reference
@@ -151,7 +150,7 @@ impl TableFunctionImpl for ReadNetCDFFunc {
         }
 
         let factory = state
-            .get_file_format_factory(NETCDF_FORMAT)
+            .get_file_format_factory(super::NETCDF_EXTENSION)
             .ok_or_else(|| {
                 datafusion::error::DataFusionError::Execution(
                     "read_netcdf: the NetCDF file format is not registered on the session"

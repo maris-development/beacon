@@ -42,6 +42,7 @@ AGENTS.md
 .claude/
 beacon-arrow-tiff/test-files/TEMP_AVG_20201201.tif
 plans/
+/docs/superpowers/
 # --- beacon-db-py: maturin/PyO3 build artifacts ---
 # The compiled extension module `maturin develop` drops into the package dir. It is a
 # ~400 MB build output and must never be tracked (it once blocked a push at GitHub's 100 MB

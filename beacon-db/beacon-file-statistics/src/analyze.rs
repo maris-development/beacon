@@ -207,7 +207,7 @@ fn null_count(column: &ColumnStatistics) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
-    use arrow::datatypes::{Field, Schema};
+    use arrow::datatypes::{Field, Schema, TimeUnit};
     use beacon_datafusion_ext::type_widening::DefaultArrowTypeWidening;
     use datafusion::common::Statistics;
     use datafusion::common::stats::Precision;
@@ -324,5 +324,28 @@ mod tests {
         assert_eq!(columns[0].min, None);
         assert_eq!(columns[0].max, Some(ScalarValue::Float64(Some(9.0))));
         assert_eq!(columns[0].null_count, None);
+    }
+
+    #[test]
+    fn a_microsecond_time_casts_to_a_nanosecond_table_type() {
+        let micros = DataType::Timestamp(TimeUnit::Microsecond, None);
+        let nanos = DataType::Timestamp(TimeUnit::Nanosecond, None);
+        let table = Schema::new(vec![Field::new("time", nanos, true)]);
+        let layout = Layout::new(&table, None).expect("a layout");
+        let file = output(
+            vec![Field::new("time", micros, true)],
+            vec![known(
+                ScalarValue::TimestampMicrosecond(Some(1), None),
+                ScalarValue::TimestampMicrosecond(Some(1), None),
+                0,
+            )],
+            Precision::Exact(1),
+        );
+
+        let (_, columns) = column_values(&file, &layout, &DefaultArrowTypeWidening::new());
+
+        let expected = Some(ScalarValue::TimestampNanosecond(Some(1000), None));
+        assert_eq!(columns[0].min, expected);
+        assert_eq!(columns[0].max, expected);
     }
 }

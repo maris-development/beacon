@@ -6,16 +6,23 @@
 
 use std::{ops::Range, sync::Arc};
 
+use arrow::datatypes::{
+    ArrowNativeType, ArrowPrimitiveType, Float32Type, Float64Type, Int8Type, Int16Type, Int32Type,
+    Int64Type, UInt8Type, UInt16Type, UInt32Type, UInt64Type,
+};
 use async_tiff::ImageFileDirectory;
 use async_tiff::decoder::{Decoder, DecoderRegistry};
 use async_tiff::reader::{AsyncFileReader, Endianness};
 use async_tiff::tags::{
     Compression, PhotometricInterpretation, PlanarConfiguration, Predictor, SampleFormat,
 };
-use beacon_nd_array::datatypes::NdArrayType;
 use bytes::Bytes;
+use futures::StreamExt;
 
 use crate::reader::ObjectStoreAsyncReader;
+
+/// The maximum number of blocks that one window read fetches at the same time.
+const MAX_CONCURRENT_BLOCKS: usize = 16;
 
 /// The approximate pixel count of one read chunk of a stripped image.
 const TARGET_STRIP_CHUNK_PIXELS: usize = 256 * 256;
@@ -80,7 +87,10 @@ fn unpack_bits(data: &[u8]) -> Option<Vec<u8>> {
 }
 
 /// A pixel sample type that a TIFF block can hold.
-pub(crate) trait TiffSample: NdArrayType + Copy + Default {
+pub(crate) trait TiffSample: ArrowNativeType + 'static {
+    /// The Arrow type of a band of this sample type.
+    type Arrow: ArrowPrimitiveType<Native = Self>;
+
     /// The size of one sample in bytes.
     const BYTES: usize;
 
@@ -89,11 +99,15 @@ pub(crate) trait TiffSample: NdArrayType + Copy + Default {
 
     /// Parse a `GDAL_NODATA` value. Returns `None` when the type cannot hold it.
     fn parse_nodata(text: &str) -> Option<Self>;
+
+    /// True when this sample is the nodata value. A NaN nodata matches each NaN.
+    fn is_nodata(self, nodata: Self) -> bool;
 }
 
 macro_rules! impl_int_sample {
-    ($($T:ty),*) => {$(
+    ($($T:ty => $A:ty),*) => {$(
         impl TiffSample for $T {
+            type Arrow = $A;
             const BYTES: usize = std::mem::size_of::<$T>();
 
             fn from_ne_slice(bytes: &[u8]) -> Self {
@@ -111,13 +125,18 @@ macro_rules! impl_int_sample {
                     && value <= <$T>::MAX as f64;
                 exact.then_some(value as $T)
             }
+
+            fn is_nodata(self, nodata: Self) -> bool {
+                self == nodata
+            }
         }
     )*};
 }
 
 macro_rules! impl_float_sample {
-    ($($T:ty),*) => {$(
+    ($($T:ty => $A:ty),*) => {$(
         impl TiffSample for $T {
+            type Arrow = $A;
             const BYTES: usize = std::mem::size_of::<$T>();
 
             fn from_ne_slice(bytes: &[u8]) -> Self {
@@ -127,12 +146,19 @@ macro_rules! impl_float_sample {
             fn parse_nodata(text: &str) -> Option<Self> {
                 text.parse::<f64>().ok().map(|value| value as $T)
             }
+
+            fn is_nodata(self, nodata: Self) -> bool {
+                self == nodata || (self.is_nan() && nodata.is_nan())
+            }
         }
     )*};
 }
 
-impl_int_sample!(i8, i16, i32, i64, u8, u16, u32, u64);
-impl_float_sample!(f32, f64);
+impl_int_sample!(
+    i8 => Int8Type, i16 => Int16Type, i32 => Int32Type, i64 => Int64Type,
+    u8 => UInt8Type, u16 => UInt16Type, u32 => UInt32Type, u64 => UInt64Type
+);
+impl_float_sample!(f32 => Float32Type, f64 => Float64Type);
 
 /// The geometry and the decode settings of the blocks of one TIFF image.
 #[derive(Debug)]
@@ -530,6 +556,58 @@ impl<T: TiffSample> TiffImage<T> {
             .map(Some)
             .map_err(|e| anyhow::anyhow!("Failed to read {}: {e:#}", context()))
     }
+
+    /// The samples of `band` in the window `rows` x `cols`, row by row.
+    ///
+    /// Fetches only the blocks that intersect the window. A pixel of a sparse block gets `fill`.
+    /// The window must lie inside the image.
+    pub(crate) async fn read_window(
+        &self,
+        band: usize,
+        rows: Range<usize>,
+        cols: Range<usize>,
+        fill: T,
+    ) -> anyhow::Result<Vec<T>> {
+        let layout = &self.layout;
+        let (n_rows, n_cols) = (rows.len(), cols.len());
+        let mut result = vec![fill; n_rows * n_cols];
+        if n_rows == 0 || n_cols == 0 {
+            return Ok(result);
+        }
+
+        let (bw, bh) = (layout.block_width, layout.block_height);
+        let block_rows = rows.start / bh..=(rows.end - 1) / bh;
+        let block_cols = cols.start / bw..=(cols.end - 1) / bw;
+        let coords: Vec<(usize, usize)> = block_rows
+            .flat_map(|by| block_cols.clone().map(move |bx| (bx, by)))
+            .collect();
+        let mut blocks = futures::stream::iter(coords)
+            .map(|(bx, by)| async move { (bx, by, self.block(band, bx, by).await) })
+            .buffer_unordered(MAX_CONCURRENT_BLOCKS);
+
+        // A block of a pixel-interleaved image holds every band of each pixel.
+        let samples = layout.block_samples();
+        let sample = if layout.planar { 0 } else { band };
+
+        while let Some((bx, by, block)) = blocks.next().await {
+            // `None` is a sparse block. Its pixels keep the fill.
+            let Some(block) = block? else { continue };
+            let rows_in_block = block.len() / (bw * samples);
+
+            let row_end = rows.end.min(by * bh + rows_in_block);
+            let col_first = cols.start.max(bx * bw);
+            let col_end = cols.end.min((bx + 1) * bw);
+            for row in rows.start.max(by * bh)..row_end {
+                let src_row = (row - by * bh) * bw;
+                let dst_row = (row - rows.start) * n_cols;
+                for col in col_first..col_end {
+                    let src = (src_row + col - bx * bw) * samples + sample;
+                    result[dst_row + col - cols.start] = block[src];
+                }
+            }
+        }
+        Ok(result)
+    }
 }
 
 #[cfg(test)]
@@ -556,6 +634,15 @@ mod tests {
     fn unpack_bits_rejects_a_truncated_run() {
         assert_eq!(unpack_bits(&[0x03, 0x01, 0x02]), None);
         assert_eq!(unpack_bits(&[0xFE]), None);
+    }
+
+    #[test]
+    fn nan_nodata_matches_nan() {
+        assert!(f32::NAN.is_nodata(f32::NAN));
+        assert!(f64::NAN.is_nodata(f64::NAN));
+        assert!(!1.0f32.is_nodata(f32::NAN));
+        assert!(!f32::NAN.is_nodata(-9999.0));
+        assert!((-9999i16).is_nodata(-9999));
     }
 
     #[test]

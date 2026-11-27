@@ -36,15 +36,17 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use arrow::array::{Array, ArrayRef, AsArray, Float64Array, TimestampNanosecondArray};
+use arrow::compute::cast;
+use arrow::datatypes::{DataType, Float64Type, Int64Type};
 use beacon_arrow_netcdf::dimensions::PhonyDimensions;
-use beacon_arrow_netcdf::oxcdf_reader::compat;
-use beacon_nd_array::datatypes::TimestampNanosecond;
-use beacon_nd_array::{NdArray, NdArrayD};
+use beacon_arrow_netcdf::nd::{stored_length, NetcdfVariable};
+use beacon_nd_dataset::{Dimension, Dimensions, MemoryVariable, NdArrowArray, NdVariable, Region};
 use indexmap::IndexMap;
 use oxcdf::AsyncNetcdfFile;
 
 /// The payload of an OptoDAS file, which every other path is relative to.
-const PAYLOAD: &str = "data";
+pub(crate) const PAYLOAD: &str = "data";
 /// One nanosecond per second, for the epoch seconds the file records.
 const NANOS_PER_SECOND: f64 = 1_000_000_000.0;
 
@@ -242,151 +244,107 @@ impl OptoDas {
         &self.axis_names
     }
 
-    /// Add to `arrays` what the file describes but does not store.
+    /// The scale that turns the payload counts into the unit of the file.
+    pub fn scale(&self) -> Option<f64> {
+        self.scale
+    }
+
+    /// The coordinates the file describes but does not store: `time` and `distance`.
     ///
-    /// Three things: the `time` coordinate, the `distance` coordinate, and the
-    /// payload decoded through the scale the file records. Every column the
-    /// file holds keeps its own name and its own values.
-    pub async fn decorate(
-        &self,
-        file: &Arc<AsyncNetcdfFile>,
-        phony: &PhonyDimensions,
-        arrays: &mut IndexMap<String, Arc<dyn NdArrayD>>,
-    ) -> anyhow::Result<()> {
+    /// `time` counts in nanoseconds, so one `dt` of 8 ms stays exact to the end of a file.
+    pub fn coordinates(&self) -> beacon_nd_dataset::Result<Vec<Arc<dyn NdVariable>>> {
+        let mut coordinates: Vec<Arc<dyn NdVariable>> = Vec::new();
         if let Some(time) = &self.time {
-            // Count in nanoseconds, not in seconds. One `dt` of 0.008 s is
-            // 8 ms exactly here, where `start + sample * dt` in doubles loses a
-            // few hundred nanoseconds by the end of a file.
             let start = (time.start * NANOS_PER_SECOND).round() as i64;
             let step = (time.step * NANOS_PER_SECOND).round() as i64;
-            let values: Vec<TimestampNanosecond> = (0..time.len)
-                .map(|sample| TimestampNanosecond(start + sample as i64 * step))
-                .collect();
-            insert_coordinate(
-                arrays,
-                &time.dimension,
-                NdArray::<TimestampNanosecond>::try_new_from_vec_in_mem(
-                    values,
-                    vec![time.len],
-                    vec![time.dimension.clone()],
-                    None,
-                )
-                .map(|array| Arc::new(array) as Arc<dyn NdArrayD>)?,
+            let values = TimestampNanosecondArray::from_iter_values(
+                (0..time.len).map(|sample| start + sample as i64 * step),
             );
+            coordinates.push(coordinate(&time.dimension, time.len, Arc::new(values))?);
         }
-
         if let Some(distance) = &self.distance {
-            let values: Vec<f64> = (0..distance.len)
-                .map(|position| (distance.first + position as f64 * distance.step) * distance.scale)
-                .collect();
-            insert_coordinate(
-                arrays,
+            let values = Float64Array::from_iter_values((0..distance.len).map(|position| {
+                (distance.first + position as f64 * distance.step) * distance.scale
+            }));
+            coordinates.push(coordinate(
                 &distance.dimension,
-                NdArray::<f64>::try_new_from_vec_in_mem(
-                    values,
-                    vec![distance.len],
-                    vec![distance.dimension.clone()],
-                    None,
-                )
-                .map(|array| Arc::new(array) as Arc<dyn NdArrayD>)?,
-            );
+                distance.len,
+                Arc::new(values),
+            )?);
         }
-
-        // The payload holds counts. One number turns them into the unit the
-        // file names, and it lives in another group, so the CF path cannot find
-        // it on its own.
-        if let (Some(scale), Some(payload)) = (self.scale, file.variable(PAYLOAD)) {
-            match compat::variable_to_nd_array_packed(
-                file.clone(),
-                &payload,
-                phony,
-                Some((scale, 0.0)),
-            ) {
-                Ok(decoded) => {
-                    arrays.insert(PAYLOAD.to_string(), decoded);
-                }
-                Err(error) => tracing::warn!(
-                    "the payload does not decode through 'header/dataScale', so it stays raw: {error}"
-                ),
-            }
-        }
-
-        arrays.sort_keys();
-        Ok(())
+        Ok(coordinates)
     }
 }
 
-/// Add one coordinate under the name of its axis.
-///
-/// A column the file itself holds under that name wins. This layer describes a
-/// file; it never overwrites one.
-fn insert_coordinate(
-    arrays: &mut IndexMap<String, Arc<dyn NdArrayD>>,
-    name: &str,
-    coordinate: Arc<dyn NdArrayD>,
-) {
-    if arrays.contains_key(name) {
-        tracing::warn!("the file holds a dataset called '{name}' already, so it keeps it");
-        return;
-    }
-    arrays.insert(name.to_string(), coordinate);
+/// One 1-D in-memory coordinate on the axis `dimension`.
+fn coordinate(
+    dimension: &str,
+    len: usize,
+    values: ArrayRef,
+) -> beacon_nd_dataset::Result<Arc<dyn NdVariable>> {
+    let dimensions = Dimensions::try_new([Dimension::new(dimension, len)])?;
+    let array = NdArrowArray::try_new(values, dimensions)?;
+    Ok(Arc::new(MemoryVariable::new(dimension, array)))
 }
 
 // ─── Reading the few values the check needs ────────────────────────────────
 
-/// One variable as a lazy array, or `None` when the file holds no such thing.
-fn array_of(file: &Arc<AsyncNetcdfFile>, path: &str) -> Option<Arc<dyn NdArrayD>> {
+/// All values of one variable, or `None` when the file holds no such thing.
+async fn read_column(file: &Arc<AsyncNetcdfFile>, path: &str) -> Option<ArrayRef> {
     let variable = file.variable(path)?;
-    compat::variable_to_nd_array(file.clone(), &variable, &PhonyDimensions::none()).ok()
+    let phony = PhonyDimensions::none();
+    let sizes: IndexMap<String, usize> = phony
+        .apply(&variable.dimensions)
+        .into_iter()
+        .zip(stored_length(&variable))
+        .collect();
+    let column = NetcdfVariable::try_new(
+        Arc::from(path),
+        Arc::from(path),
+        file.clone(),
+        &variable,
+        &phony,
+        &sizes,
+    )
+    .ok()?;
+    let read = column.read(&Region::full(column.dimensions())).await.ok()?;
+    Some(read.values().clone())
 }
 
 /// The strings of one variable.
 async fn read_strings(file: &Arc<AsyncNetcdfFile>, path: &str) -> Option<Vec<String>> {
-    let array = array_of(file, path)?;
-    let typed = array.as_any().downcast_ref::<NdArray<String>>()?;
-    Some(typed.clone_into_raw_vec().await)
+    let values = read_column(file, path).await?;
+    let strings = values.as_string_opt::<i32>()?;
+    Some(
+        strings
+            .iter()
+            .map(|value| value.unwrap_or_default().to_string())
+            .collect(),
+    )
 }
 
 /// The integers of one variable, whatever width the file wrote them at.
 async fn read_i64s(file: &Arc<AsyncNetcdfFile>, path: &str) -> Option<Vec<i64>> {
-    let array = array_of(file, path)?;
-    if let Some(typed) = array.as_any().downcast_ref::<NdArray<i64>>() {
-        return Some(typed.clone_into_raw_vec().await);
+    let values = read_column(file, path).await?;
+    if !values.data_type().is_integer() {
+        return None;
     }
-    if let Some(typed) = array.as_any().downcast_ref::<NdArray<i32>>() {
-        return Some(
-            typed
-                .clone_into_raw_vec()
-                .await
-                .into_iter()
-                .map(i64::from)
-                .collect(),
-        );
-    }
-    None
+    let values = cast(&values, &DataType::Int64).ok()?;
+    Some(values.as_primitive::<Int64Type>().values().to_vec())
 }
 
 /// The first value of one variable, as a double.
 async fn read_f64(file: &Arc<AsyncNetcdfFile>, path: &str) -> Option<f64> {
-    let array = array_of(file, path)?;
-    if let Some(typed) = array.as_any().downcast_ref::<NdArray<f64>>() {
-        return typed.clone_into_raw_vec().await.first().copied();
+    let values = read_column(file, path).await?;
+    if !(values.data_type().is_integer() || values.data_type().is_floating()) {
+        return None;
     }
-    if let Some(typed) = array.as_any().downcast_ref::<NdArray<i64>>() {
-        return typed
-            .clone_into_raw_vec()
-            .await
-            .first()
-            .map(|value| *value as f64);
-    }
-    if let Some(typed) = array.as_any().downcast_ref::<NdArray<i32>>() {
-        return typed
-            .clone_into_raw_vec()
-            .await
-            .first()
-            .map(|value| *value as f64);
-    }
-    None
+    let values = cast(&values, &DataType::Float64).ok()?;
+    values
+        .as_primitive::<Float64Type>()
+        .values()
+        .first()
+        .copied()
 }
 
 // ─── Tests ─────────────────────────────────────────────────────────────────
@@ -441,107 +399,5 @@ mod tests {
     async fn it_stands_down_on_another_file() {
         let (file, phony) = open(PLAIN_FILE).await;
         assert!(detect(&file, &phony).await.unwrap().is_none());
-    }
-
-    /// The clock counts in nanoseconds, so every step is exact.
-    #[tokio::test]
-    async fn it_builds_the_clock_the_file_describes() {
-        let (file, phony) = open(OPTODAS_FILE).await;
-        let found = detect(&file, &phony).await.unwrap().unwrap();
-        let mut arrays = IndexMap::new();
-        found.decorate(&file, &phony, &mut arrays).await.unwrap();
-
-        let time = arrays.get("time").expect("a time column");
-        assert_eq!(time.dimensions(), vec!["time".to_string()]);
-        let values = time
-            .as_any()
-            .downcast_ref::<NdArray<TimestampNanosecond>>()
-            .expect("nanosecond timestamps")
-            .clone_into_raw_vec()
-            .await;
-
-        // 2026-03-28T12:00:00Z, then 8 ms per sample, six of them.
-        let start = 1_774_699_200_000_000_000i64;
-        assert_eq!(
-            values.iter().map(|value| value.0).collect::<Vec<i64>>(),
-            (0..6)
-                .map(|step| start + step * 8_000_000)
-                .collect::<Vec<i64>>()
-        );
-    }
-
-    /// The positions come from the range the file records for the axis.
-    #[tokio::test]
-    async fn it_builds_the_positions_the_file_describes() {
-        let (file, phony) = open(OPTODAS_FILE).await;
-        let found = detect(&file, &phony).await.unwrap().unwrap();
-        let mut arrays = IndexMap::new();
-        found.decorate(&file, &phony, &mut arrays).await.unwrap();
-
-        let distance = arrays.get("distance").expect("a distance column");
-        assert_eq!(distance.dimensions(), vec!["distance".to_string()]);
-        let values = distance
-            .as_any()
-            .downcast_ref::<NdArray<f64>>()
-            .expect("metres")
-            .clone_into_raw_vec()
-            .await;
-        // 4 raw channels apart, 1.25 m each.
-        assert_eq!(values, vec![0.0, 5.0, 10.0, 15.0]);
-    }
-
-    /// The payload decodes through the scale the file records, which sits in
-    /// another group and which no CF rule would find.
-    #[tokio::test]
-    async fn it_decodes_the_payload_through_the_scale_of_the_file() {
-        let (file, phony) = open(OPTODAS_FILE).await;
-        let found = detect(&file, &phony).await.unwrap().unwrap();
-        let mut arrays = IndexMap::new();
-        arrays.insert(
-            PAYLOAD.to_string(),
-            compat::variable_to_nd_array(file.clone(), &file.variable(PAYLOAD).unwrap(), &phony)
-                .unwrap(),
-        );
-        found.decorate(&file, &phony, &mut arrays).await.unwrap();
-
-        let payload = arrays.get(PAYLOAD).unwrap();
-        assert_eq!(
-            payload.datatype(),
-            beacon_nd_array::datatypes::NdArrayDataType::F64
-        );
-        let values = payload
-            .as_any()
-            .downcast_ref::<NdArray<f64>>()
-            .expect("decoded counts")
-            .clone_into_raw_vec()
-            .await;
-        // The counts run 0, 1, 2 … and the scale is 0.5.
-        assert_eq!(values[..4].to_vec(), vec![0.0, 0.5, 1.0, 1.5]);
-    }
-
-    /// A column the file holds itself is never overwritten.
-    #[tokio::test]
-    async fn a_column_of_the_file_wins_over_a_coordinate() {
-        let (file, phony) = open(OPTODAS_FILE).await;
-        let found = detect(&file, &phony).await.unwrap().unwrap();
-
-        let mine = NdArray::<f64>::try_new_from_vec_in_mem(
-            vec![-1.0; 4],
-            vec![4],
-            vec!["distance".to_string()],
-            None,
-        )
-        .unwrap();
-        let mut arrays: IndexMap<String, Arc<dyn NdArrayD>> = IndexMap::new();
-        arrays.insert("distance".to_string(), Arc::new(mine));
-        found.decorate(&file, &phony, &mut arrays).await.unwrap();
-
-        let kept = arrays["distance"]
-            .as_any()
-            .downcast_ref::<NdArray<f64>>()
-            .unwrap()
-            .clone_into_raw_vec()
-            .await;
-        assert_eq!(kept, vec![-1.0; 4], "the file keeps its own column");
     }
 }

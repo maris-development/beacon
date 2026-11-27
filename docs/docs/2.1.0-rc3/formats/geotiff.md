@@ -64,23 +64,39 @@ such as LERC, LZMA or WebP, gives an error that names the file.
 Beacon reads the full-resolution image. It skips overviews and masks. A pixel that only a GDAL mask
 band hides keeps its value. Set a nodata value to hide such pixels.
 
+A pixel with the nodata value (`GDAL_NODATA`) reads as `NULL`. A NaN nodata value makes each NaN
+pixel `NULL`.
+
 A sparse file has blocks with no data. GDAL writes such a file with `SPARSE_OK=TRUE`. Beacon reads
 no bytes for a sparse block. Each pixel of that block gets the nodata value, so the query shows
 `NULL`. If the file has no nodata value, each pixel gets 0.
 
-### Tag attributes
+### Columns
 
-A GeoTIFF file carries TIFF tags and GeoTIFF metadata such as `nodata`, `crs` and `scale`. Beacon
-shows these per band as extra columns. It uses dot notation: `<band>.<attribute>`. The `nodata` tag
-of the `band_1` column becomes `band_1.nodata`.
+Each band is one column: `band.0`, `band.1` and so on. The first band is `band.0`. A band column
+has the sample type of the file.
 
-An attribute column keeps the type from the file: string, integer, float and so on.
+`geo.lat` and `geo.lon` are `Float64`. A file without a geotransform has no `geo.lat` and no
+`geo.lon` column. A rotated grid also has no coordinate columns.
 
-A file tag belongs to no band. Beacon shows it with a leading dot and no band prefix:
-`.<attribute>`. The file tag `crs` becomes the column `.crs`.
+The TIFF tags are columns with one value for each file:
+
+| Column | Type | Source |
+|--------|------|--------|
+| `image.width`, `image.height` | `UInt32` | Image size in pixels |
+| `image.samples_per_pixel`, `image.bits_per_sample` | `UInt16` | Sample layout |
+| `image.tile_width`, `image.tile_height` | `UInt32` | Tile size, tiled files only |
+| `image.tile_count_x`, `image.tile_count_y` | `UInt64` | Tile count, tiled files only |
+| `geo.epsg` | `UInt16` | EPSG code of the CRS |
+| `geo.crs` | `Utf8` | `EPSG:<code>` |
+| `geo.model_pixel_scale`, `geo.model_tiepoint`, `geo.model_transformation` | `Utf8` | GeoTIFF tags, comma separated |
+| `geo.nodata` | `Utf8` | `GDAL_NODATA` |
+| `geo.gdal_metadata` | `Utf8` | `GDAL_METADATA` XML |
+
+A column is absent when the file does not have its tag.
 
 ```sql
-SELECT band_1, "band_1.nodata", "band_1.scale", ".crs"
+SELECT "band.0", "geo.lon", "geo.lat", "geo.crs"
 FROM read_tiff(['rasters/elevation.tif'])
 LIMIT 1
 ```
@@ -97,6 +113,8 @@ See [Create External Tables](/docs/2.1.0-rc3/data-sources/external-tables) for t
 full read model.
 
 ### `OPTIONS`
+
+A TIFF table does not support `PARTITIONED BY`. A query on such a table gives an error.
 
 `STORED AS TIFF` reads no key. Beacon ignores an `OPTIONS` clause on this format. See
 [`OPTIONS`](/docs/2.1.0-rc3/sql/create-external-table#options) for the formats that do read one.

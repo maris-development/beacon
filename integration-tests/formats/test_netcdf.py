@@ -120,8 +120,14 @@ def test_the_schema_is_reported(con):
     assert relation.types == ["Float32", "Float32"]
 
 
-def test_count_star(con):
-    assert con.sql("SELECT count(*) AS n FROM read_netcdf('point.nc')").fetchall() == [(ROWS,)]
+def test_count_of_a_column(con):
+    assert con.sql("SELECT count(depth) AS n FROM read_netcdf('point.nc')").fetchall() == [(ROWS,)]
+
+
+def test_count_star_needs_a_column(con):
+    """A NetCDF scan reads at least one file column, so a bare count(*) is an error."""
+    with pytest.raises(Exception, match="at least one file column"):
+        con.sql("SELECT count(*) AS n FROM read_netcdf('point.nc')").fetchall()
 
 
 def test_a_filter(con):
@@ -157,7 +163,7 @@ def test_netcdf3_and_netcdf4_read_alike(con):
 
 def test_a_grid_broadcasts_to_one_row_per_cell(con):
     """3 x 4 x 5 dimensions, so 60 rows, each carrying its own coordinates."""
-    assert con.sql("SELECT count(*) AS n FROM read_netcdf('grid.nc')").fetchall() == [(GRID_ROWS,)]
+    assert con.sql("SELECT count(temperature) AS n FROM read_netcdf('grid.nc')").fetchall() == [(GRID_ROWS,)]
 
     rows = con.sql(
         "SELECT time, latitude, longitude, temperature FROM read_netcdf('grid.nc') "
@@ -210,7 +216,7 @@ def test_cf_time_decodes_against_its_epoch(con):
 
 
 def test_a_glob_reads_every_file(con):
-    total = con.sql("SELECT count(*) AS n FROM read_netcdf('part-*.nc')").fetchall()[0][0]
+    total = con.sql("SELECT count(depth) AS n FROM read_netcdf('part-*.nc')").fetchall()[0][0]
     assert total == 10, "two files of five rows"
 
 
@@ -227,7 +233,7 @@ def test_a_glob_column_order_is_stable(con):
 
 def test_an_external_table_reads(con):
     con.execute("CREATE EXTERNAL TABLE obs STORED AS NC LOCATION 'point.nc'")
-    assert con.sql("SELECT count(*) AS n FROM obs").fetchall() == [(ROWS,)]
+    assert con.sql("SELECT count(depth) AS n FROM obs").fetchall() == [(ROWS,)]
     assert "obs" in con.list_tables()
 
 
@@ -238,12 +244,12 @@ def test_an_external_table_survives_a_restart(datasets, tmp_path):
     with beacondb.connect(path, datasets=str(datasets)) as con:
         con.execute("CREATE EXTERNAL TABLE obs STORED AS NC LOCATION 'point.nc'")
         con.execute("CREATE EXTERNAL TABLE grid STORED AS NC LOCATION 'grid.nc'")
-        before = con.sql("SELECT count(*) AS n FROM obs").fetchall()
+        before = con.sql("SELECT count(depth) AS n FROM obs").fetchall()
 
     # Reopened: a different connection to the same file.
     with beacondb.connect(path, datasets=str(datasets)) as con:
-        assert con.sql("SELECT count(*) AS n FROM obs").fetchall() == before
-        assert con.sql("SELECT count(*) AS n FROM grid").fetchall() == [(GRID_ROWS,)]
+        assert con.sql("SELECT count(depth) AS n FROM obs").fetchall() == before
+        assert con.sql("SELECT count(temperature) AS n FROM grid").fetchall() == [(GRID_ROWS,)]
         assert {"obs", "grid"} <= set(con.list_tables())
         rows = con.sql("SELECT depth, temperature FROM obs ORDER BY depth LIMIT 2").fetchall()
         assert rows == [(0.0, 5.0), (10.0, 5.5)]
@@ -253,7 +259,7 @@ def test_an_external_table_over_a_glob_survives_a_restart(datasets, tmp_path):
     path = str(tmp_path / "glob.db")
     with beacondb.connect(path, datasets=str(datasets)) as con:
         con.execute("CREATE EXTERNAL TABLE parts STORED AS NC LOCATION 'part-*.nc'")
-        assert con.sql("SELECT count(*) AS n FROM parts").fetchall() == [(10,)]
+        assert con.sql("SELECT count(depth) AS n FROM parts").fetchall() == [(10,)]
 
     with beacondb.connect(path, datasets=str(datasets)) as con:
-        assert con.sql("SELECT count(*) AS n FROM parts").fetchall() == [(10,)]
+        assert con.sql("SELECT count(depth) AS n FROM parts").fetchall() == [(10,)]
