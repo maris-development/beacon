@@ -133,7 +133,7 @@ struct Group {
 /// Group classified files into candidate tables.
 ///
 /// A file is only crawled when `extensions` lists its on-disk extension for its
-/// `format` — this cleanly excludes marker/dir-based formats (zarr/atlas markers
+/// `format` — this cleanly excludes marker/dir-based formats (zarr markers
 /// are `*.json`) and prevents geoparquet from double-claiming `*.parquet` files.
 /// Skipped files are returned for reporting.
 pub fn group_into_tables(
@@ -456,25 +456,6 @@ mod tests {
         let (cands, skipped) = group_into_tables(&datasets, &def(), &extensions());
         assert!(cands.is_empty());
         assert_eq!(skipped.len(), 2);
-    }
-
-    /// An Atlas collection is one file, `data.atlas`, so its extension is its
-    /// format and the crawler can build a table over it. That is the difference
-    /// from Zarr, whose store is a directory behind a `zarr.json`.
-    ///
-    /// Each collection lives in its own directory, and tables group by
-    /// directory, so each becomes its own table. Several collections in one
-    /// table is what an external table over a glob is for.
-    #[test]
-    fn an_atlas_collection_is_crawlable() {
-        let datasets = vec![
-            ds("d/january/data.atlas", "atlas"),
-            ds("d/february/data.atlas", "atlas"),
-        ];
-        let (cands, skipped) = group_into_tables(&datasets, &def(), &extensions());
-        assert!(skipped.is_empty(), "{skipped:?}");
-        assert_eq!(cands.len(), 2, "one per directory");
-        assert!(cands.iter().all(|table| table.format == "atlas"));
     }
 
     /// The glob keeps the file's own extension, so it matches the `.nc4` files.

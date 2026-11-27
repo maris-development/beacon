@@ -140,7 +140,6 @@ fn install_panic_hook() {
 const NOISY_DEPENDENCIES: &[&str] = &[
     "arrow",
     "array_format",
-    "atlas",
     "aws_config",
     "aws_smithy_runtime",
     "datafusion",

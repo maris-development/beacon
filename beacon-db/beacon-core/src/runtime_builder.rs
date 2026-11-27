@@ -6,7 +6,6 @@ use std::{
 use crate::crawler::{new_crawler_manager_handle, CrawlerConfig, CrawlerManager};
 use crate::plugins::{PluginRegistry, PluginStatus};
 use crate::schema_persistence::{init_tables, PersistentSchemaProvider};
-use beacon_arrow_atlas::{AtlasFormatFactory, AtlasOptions};
 use beacon_arrow_csv::datafusion::CsvFormatFactory;
 use beacon_arrow_geoparquet::datafusion::GeoParquetFormatFactory;
 use beacon_arrow_hdf5::Hdf5Config;
@@ -313,7 +312,7 @@ impl RuntimeBuilder {
         // external table's definition names its format (`STORED AS ZARR`), which is
         // resolved through `SessionState::get_file_format_factory`. Register these
         // after recovery and only DataFusion's built-ins (CSV/Parquet/Arrow/JSON) are
-        // present, so every table in a *beacon* format — Atlas, Zarr, GeoTIFF,
+        // present, so every table in a *beacon* format — Zarr, GeoTIFF,
         // GeoParquet, NetCDF, HDF5 — fails to rebuild with "Could not find FileFormat"
         // and is skipped, i.e. silently vanishes from the catalog on restart.
         // Table functions come along for the same reason: a persisted view's SQL can
@@ -685,7 +684,6 @@ fn register_file_formats(
         Arc::new(
             ZarrFormatFactory::new(builder.zarr.clone()).with_output_dir(native_output_dir.clone()),
         ),
-        Arc::new(AtlasFormatFactory::new(AtlasOptions::default())),
         Arc::new(GeoParquetFormatFactory::default()),
         Arc::new(NetCDFFormatFactory::new(
             listing_factory.clone(),

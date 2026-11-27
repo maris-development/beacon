@@ -47,7 +47,6 @@ beacon-delta = { path = "../beacon-table-providers/beacon-delta" }
 beacon-iceberg = { path = "../beacon-table-providers/beacon-iceberg" }
 beacon-icechunk = { path = "../beacon-table-providers/beacon-icechunk" }
 beacon-arrow-zarr = { path = "../beacon-file-formats/beacon-arrow-zarr" }
-beacon-arrow-atlas = { path = "../beacon-file-formats/beacon-arrow-atlas" }
 beacon-arrow-ipc = { path = "../beacon-file-formats/beacon-arrow-ipc" }
 beacon-arrow-csv = { path = "../beacon-file-formats/beacon-arrow-csv" }
 beacon-arrow-parquet = { path = "../beacon-file-formats/beacon-arrow-parquet" }

@@ -1,6 +1,6 @@
 //! Planning over a very wide table.
 //!
-//! An Atlas table can declare 100k+ columns. DataFusion's common-subexpression
+//! An external table can declare 100k+ columns. DataFusion's common-subexpression
 //! rule copies every input column into an intermediate projection, one linear
 //! schema lookup per column, so the scan must be narrowed before that rule
 //! runs. The runtime puts `OptimizeProjections` first in its rule list for

@@ -16,7 +16,7 @@
 //! which lists the files and groups them — builds the `FileScanConfig`, and
 //! lets the format turn it into a plan. `create_physical_plan` is what turns the
 //! config into a plan, so every format keeps the shape it wants: netCDF and HDF5
-//! stack decode and broadcast nodes over their scan, and Zarr and Atlas expand
+//! stack decode and broadcast nodes over their scan, and Zarr expands
 //! a store directory into partitions and reduce it to the marker at its root.
 //! Nothing here knows about any of that.
 //!

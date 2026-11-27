@@ -62,7 +62,6 @@ beacon-arrow-csv = { path = "../beacon-file-formats/beacon-arrow-csv" }
 beacon-arrow-parquet = { path = "../beacon-file-formats/beacon-arrow-parquet" }
 beacon-arrow-geoparquet = { path = "../beacon-file-formats/beacon-arrow-geoparquet" }
 beacon-arrow-zarr = { path = "../beacon-file-formats/beacon-arrow-zarr" }
-beacon-arrow-atlas = { path = "../beacon-file-formats/beacon-arrow-atlas" }
 beacon-sql-parser = { path = "../beacon-sql-parser" }
 beacon-json-query = { path = "../beacon-json-query" }
 beacon-datafusion-ext = { path = "../beacon-datafusion-ext" }
@@ -87,9 +86,6 @@ beacon-file-statistics = { path = "../beacon-file-statistics" }
 libc = "=0.2.189"
 
 [dev-dependencies]
-# Writes the Atlas fixtures the read tests read; the atlas writer takes ndarray
-# views, and Beacon itself never writes a collection.
-ndarray = { workspace = true }
 deltalake = { workspace = true }
 # Writes the Iceberg fixtures the read tests read; Beacon itself never writes Iceberg.
 iceberg = { workspace = true }

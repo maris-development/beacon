@@ -220,7 +220,6 @@ fn read_function_for_extension(ext: &str) -> Option<&'static str> {
         "nc" | "nc3" | "nc4" | "netcdf" => "read_netcdf",
         "arrow" | "arrows" | "ipc" => "read_arrow",
         "zarr" => "read_zarr",
-        "atlas" => "read_atlas",
         "tif" | "tiff" => "read_tiff",
         "h5" | "hdf5" => "read_hdf5",
         _ => return None,

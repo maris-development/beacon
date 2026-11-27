@@ -5,7 +5,7 @@
 //!
 //! The [`ArrayBackend`](crate::array::backend::ArrayBackend) trait and the
 //! dataset/Arrow conversion helpers keep returning [`anyhow::Result`]: that trait
-//! is implemented by every reader crate (NetCDF, Atlas, TIFF, Zarr, …), so a
+//! is implemented by every reader crate (NetCDF, TIFF, Zarr, …), so a
 //! typed error there would cascade across the whole workspace. The
 //! [`NdArrayError::Other`] bridge lets the two coexist — an `anyhow::Error` from
 //! a backend call converts into [`NdArrayError`] via `?`, and an

@@ -1,6 +1,6 @@
 //! DataFusion integration for zarr stores.
 //!
-//! Mirrors the netcdf/tiff/atlas crates: a [`ZarrFormatFactory`] discovers
+//! Mirrors the netcdf/tiff crates: a [`ZarrFormatFactory`] discovers
 //! zarr stores, [`ZarrFormat`] infers the merged Arrow schema and plans
 //! the scan, and [`zarr_source`] reads each leaf group through the ND scan of
 //! `beacon-nd-scan`.

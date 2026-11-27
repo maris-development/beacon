@@ -12,7 +12,7 @@ use crate::arrow::pushdown::ValueRange;
 /// boolean masks that can be applied during record batch streaming.
 ///
 /// This struct is the universal entry point for predicate pushdown across
-/// all backends (NetCDF, Zarr, Atlas).
+/// all backends (NetCDF, Zarr).
 #[derive(Debug, Clone)]
 pub struct PushdownFilter {
     _predicate: Arc<dyn PhysicalExpr>,
